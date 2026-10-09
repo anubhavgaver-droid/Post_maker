@@ -21,33 +21,26 @@ user_sessions = {}
 # ----------------- HELPER FUNCTIONS -----------------
 
 def parse_post_link(link: str):
-    """
-    Parses Normal Channel Posts & Topic Group Posts.
-    Returns: (chat_id, thread_id, msg_id)
-    """
+    link = link.strip()
     pattern_private_topic = r"https?://t\.me/c/(\d+)/(\d+)/(\d+)"
     pattern_public_topic = r"https?://t\.me/([^/]+)/(\d+)/(\d+)"
     pattern_private_channel = r"https?://t\.me/c/(\d+)/(\d+)"
     pattern_public_channel = r"https?://t\.me/([^/]+)/(\d+)"
 
-    # Topic Private
     m = re.match(pattern_private_topic, link)
     if m:
         chat_id = int(f"-100{m.group(1)}") if not m.group(1).startswith("-100") else int(m.group(1))
         return chat_id, int(m.group(2)), int(m.group(3))
 
-    # Topic Public
     m = re.match(pattern_public_topic, link)
     if m:
         return f"@{m.group(1)}", int(m.group(2)), int(m.group(3))
 
-    # Channel Private
     m = re.match(pattern_private_channel, link)
     if m:
         chat_id = int(f"-100{m.group(1)}") if not m.group(1).startswith("-100") else int(m.group(1))
         return chat_id, None, int(m.group(2))
 
-    # Channel Public
     m = re.match(pattern_public_channel, link)
     if m:
         return f"@{m.group(1)}", None, int(m.group(2))
@@ -56,9 +49,6 @@ def parse_post_link(link: str):
 
 
 def parse_channel_input(channel_text: str):
-    """
-    Formats channel username or numeric ID properly.
-    """
     text = channel_text.strip()
     if text.startswith("https://t.me/"):
         text = text.replace("https://t.me/", "").split("/")[0]
@@ -79,9 +69,6 @@ def parse_channel_input(channel_text: str):
 
 
 def build_preview_keyboard(grid_data):
-    """
-    Generates inline keyboard with style attributes if present.
-    """
     keyboard = []
     for r_idx, row in enumerate(grid_data):
         row_buttons = []
@@ -125,11 +112,12 @@ async def start_cmd(client: Client, message: Message):
         return
     await message.reply_text(
         "<b>👋 Interactive Post Builder & Editor Bot!</b>\n\n"
-        "➡️ /newpost - Channel post UI builder se banayein\n"
-        "➡️ /editpost - Channel post edit / refresh karein\n"
-        "➡️ /topicpost - Topic Group Thread mein post bhejein\n"
-        "➡️ /edittopic - Topic Group post edit / refresh karein\n"
-        "➡️ /cancel - Current process cancel karein"
+        "✨ <i>Telegram Premium Emoji & Style Supported</i>\n\n"
+        "➡️ /newpost - Channel post UI builder\n"
+        "➡️ /editpost - Channel post edit / refresh\n"
+        "➡️ /topicpost - Topic Group Thread post\n"
+        "➡️ /edittopic - Topic Group post edit\n"
+        "➡️ /cancel - Cancel process"
     )
 
 
@@ -149,14 +137,18 @@ async def newpost_cmd(client: Client, message: Message):
     if user_id not in ADMIN_IDS:
         return
 
+    is_prem = message.from_user.is_premium
+    prem_status = "✨ <b>[Telegram Premium Detected: Emoji Enabled]</b>" if is_prem else "ℹ️ <i>Normal Account</i>"
+
     user_sessions[user_id] = {
         "mode": "NEW",
         "text": "",
         "grid": [[None]],
         "state": "WAITING_TITLE",
-        "preview_msg_id": None
+        "preview_msg_id": None,
+        "is_premium": is_prem
     }
-    await message.reply_text("<b>📝 Channel Post Content / Message bhejein:</b>")
+    await message.reply_text(f"{prem_status}\n\n<b>📝 Channel Post Content / Message bhejein (Emojis allowed):</b>")
 
 
 @app.on_message(filters.command("editpost") & filters.private)
@@ -169,7 +161,8 @@ async def editpost_cmd(client: Client, message: Message):
         "mode": "EDIT",
         "grid": [],
         "state": "WAITING_POST_LINK",
-        "preview_msg_id": None
+        "preview_msg_id": None,
+        "is_premium": message.from_user.is_premium
     }
     await message.reply_text("<b>🔗 Channel Post Ka Link Bhejein:</b>\n(e.g. <code>https://t.me/mychannel/123</code>)")
 
@@ -185,7 +178,8 @@ async def topicpost_cmd(client: Client, message: Message):
         "text": "",
         "grid": [[None]],
         "state": "WAITING_TITLE",
-        "preview_msg_id": None
+        "preview_msg_id": None,
+        "is_premium": message.from_user.is_premium
     }
     await message.reply_text("<b>💬 Topic Group Post Content / Message bhejein:</b>")
 
@@ -200,7 +194,8 @@ async def edittopic_cmd(client: Client, message: Message):
         "mode": "TOPIC_EDIT",
         "grid": [],
         "state": "WAITING_POST_LINK",
-        "preview_msg_id": None
+        "preview_msg_id": None,
+        "is_premium": message.from_user.is_premium
     }
     await message.reply_text("<b>🔗 Topic Post Ka Link Bhejein:</b>\n(e.g. <code>https://t.me/c/123456/45/678</code>)")
 
@@ -216,7 +211,7 @@ async def message_handler(client: Client, message: Message):
     session = user_sessions[user_id]
     state = session.get("state")
 
-    # 1. Post Content Title
+    # 1. Post Content Title (Supports text / entities / emojis)
     if state == "WAITING_TITLE":
         session["text"] = message.text or message.caption or "Untitled Post"
         session["content_msg"] = message
@@ -225,7 +220,7 @@ async def message_handler(client: Client, message: Message):
         sent = await message.reply_text(f"<b>🔍 Live Preview:</b>\n\n{session['text']}", reply_markup=markup)
         session["preview_msg_id"] = sent.id
 
-    # 2. Fetch Post Link (For Channel OR Topic Edit)
+    # 2. Fetch Post Link
     elif state == "WAITING_POST_LINK":
         chat_id, thread_id, msg_id = parse_post_link(message.text.strip())
         if not chat_id or not msg_id:
@@ -235,7 +230,7 @@ async def message_handler(client: Client, message: Message):
         try:
             target_msg = await client.get_messages(chat_id, msg_id)
             if not target_msg or target_msg.empty:
-                await message.reply_text("❌ Post fetch nahi ho sakti. Check karein bot admin hai ya nahi.")
+                await message.reply_text("❌ Post fetch nahi ho sakti.")
                 return
 
             session["target_chat"] = chat_id
@@ -269,12 +264,15 @@ async def message_handler(client: Client, message: Message):
         except Exception as e:
             await message.reply_text(f"❌ Error: {str(e)}")
 
-    # 3. Button Name
+    # 3. Button Name (Allows Emojis if Premium)
     elif state == "WAITING_BTN_NAME":
-        session["temp_name"] = message.text.strip()
+        btn_name = message.text.strip()
+        session["temp_name"] = btn_name
         session["state"] = "WAITING_STYLE_CHOICE"
+        
+        prem_note = "✨ <i>(Premium Emoji Supported)</i>" if session.get("is_premium") else ""
         await message.reply_text(
-            f"✅ Button Name: <b>{session['temp_name']}</b>\n\n"
+            f"✅ Button Name: <b>{session['temp_name']}</b> {prem_note}\n\n"
             "🎨 **Button ka Style Select Karein:**",
             reply_markup=style_selection_keyboard()
         )
@@ -303,7 +301,7 @@ async def message_handler(client: Client, message: Message):
             )
         except Exception:
             pass
-        await message.reply_text("✨ Button added with style!")
+        await message.reply_text("✨ Button added successfully!")
 
     # 5. Final Publishing (Channel)
     elif state == "WAITING_FINAL_CHANNEL":
@@ -427,6 +425,7 @@ async def callback_handler(client: Client, query: CallbackQuery):
 
         elif mode == "TOPIC_NEW":
             session["state"] = "WAITING_TOPIC_INPUT"
+            await query.answer()
             await query.message.reply_text(
                 "💬 <b>Topic Details Bhejein:</b>\n\n"
                 "• Topic Message ka Direct Link (e.g. <code>https://t.me/c/123456/45/678</code>)\n"
