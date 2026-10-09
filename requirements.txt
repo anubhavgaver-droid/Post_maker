@@ -1,3 +1,4 @@
-pyrogram
+kurigram==2.2.25
 tgcrypto
+pyrogram
 aiohttp
