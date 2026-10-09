@@ -16,6 +16,7 @@ app = Client("interactive_post_bot", api_id=API_ID, api_hash=API_HASH, bot_token
 
 user_sessions = {}
 
+
 def parse_post_link(link: str):
     pattern_public = r"https?://t\.me/([^/]+)/(\d+)"
     pattern_private = r"https?://t\.me/c/(\d+)/(\d+)"
@@ -29,6 +30,33 @@ def parse_post_link(link: str):
         return f"@{match_pub.group(1)}", int(match_pub.group(2))
 
     return None, None
+
+
+def parse_channel_input(channel_text: str):
+    """
+    Cleans and formats channel username or ID:
+    - @username -> '@username'
+    - -100123456789 -> -100123456789 (int)
+    - 123456789 -> -100123456789 (int)
+    - https://t.me/username -> '@username'
+    """
+    text = channel_text.strip()
+    if text.startswith("https://t.me/"):
+        text = text.replace("https://t.me/", "").split("/")[0]
+        if not text.startswith("@"):
+            text = f"@{text}"
+        return text
+
+    if text.startswith("@"):
+        return text
+
+    try:
+        clean_id = int(text)
+        if not str(clean_id).startswith("-100") and clean_id > 0:
+            clean_id = int(f"-100{clean_id}")
+        return clean_id
+    except ValueError:
+        return text
 
 
 def build_preview_keyboard(grid_data):
@@ -102,6 +130,8 @@ async def editpost_cmd(client: Client, message: Message):
     await message.reply_text("<b>🔗 Channel Post Ka Link Bhejein:</b>\n(e.g. <code>https://t.me/mychannel/123</code>)")
 
 
+# ---------------- MAIN MESSAGE ROUTER ----------------
+
 @app.on_message(filters.private & ~filters.command(["start", "cancel", "newpost", "editpost"]))
 async def message_handler(client: Client, message: Message):
     user_id = message.from_user.id
@@ -111,6 +141,7 @@ async def message_handler(client: Client, message: Message):
     session = user_sessions[user_id]
     state = session.get("state")
 
+    # 1. Post Content
     if state == "WAITING_TITLE":
         session["text"] = message.text or message.caption or "Untitled Post"
         session["content_msg"] = message
@@ -119,6 +150,7 @@ async def message_handler(client: Client, message: Message):
         sent = await message.reply_text(f"<b>🔍 Live Preview:</b>\n\n{session['text']}", reply_markup=markup)
         session["preview_msg_id"] = sent.id
 
+    # 2. Edit Post Link
     elif state == "WAITING_POST_LINK":
         chat_id, msg_id = parse_post_link(message.text.strip())
         if not chat_id or not msg_id:
@@ -128,7 +160,7 @@ async def message_handler(client: Client, message: Message):
         try:
             target_msg = await client.get_messages(chat_id, msg_id)
             if not target_msg or target_msg.empty:
-                await message.reply_text("❌ Post fetch nahi ho sakti.")
+                await message.reply_text("❌ Post fetch nahi ho sakti. Check karein bot admin hai ya nahi.")
                 return
 
             session["target_chat"] = chat_id
@@ -157,11 +189,13 @@ async def message_handler(client: Client, message: Message):
         except Exception as e:
             await message.reply_text(f"❌ Error: {str(e)}")
 
+    # 3. Button Name
     elif state == "WAITING_BTN_NAME":
         session["temp_name"] = message.text.strip()
         session["state"] = "WAITING_BTN_URL"
         await message.reply_text(f"✅ Name: <b>{session['temp_name']}</b>\n🔗 Ab URL Link bhejein:")
 
+    # 4. Button URL
     elif state == "WAITING_BTN_URL":
         url = message.text.strip()
         if not (url.startswith("http://") or url.startswith("https://") or url.startswith("t.me/")):
@@ -184,6 +218,34 @@ async def message_handler(client: Client, message: Message):
             pass
         await message.reply_text("✨ Button added!")
 
+    # 5. Final Publishing Step (FIXED!)
+    elif state == "WAITING_FINAL_CHANNEL":
+        channel_input = parse_channel_input(message.text.strip())
+
+        try:
+            content_msg: Message = session["content_msg"]
+            sent = await content_msg.copy(
+                chat_id=channel_input,
+                reply_markup=session["final_markup"]
+            )
+            await message.reply_text(
+                f"🎉 <b>Post Successfully Published!</b>\n\n"
+                f"📍 <b>Target:</b> <code>{channel_input}</code>\n"
+                f"🆔 <b>Message ID:</b> <code>{(sent.id if sent else 'Sent')}</code>"
+            )
+        except Exception as e:
+            await message.reply_text(
+                f"❌ <b>Publishing Failed!</b>\n\n"
+                f"<b>Reason:</b> <code>{str(e)}</code>\n\n"
+                "<i>Kripya check karein:\n"
+                "1. Bot us channel mein Admin hai ya nahi.\n"
+                "2. Channel ID / Username sahi hai ya nahi.</i>"
+            )
+
+        del user_sessions[user_id]
+
+
+# ---------------- CALLBACK HANDLER ----------------
 
 @app.on_callback_query()
 async def callback_handler(client: Client, query: CallbackQuery):
@@ -219,7 +281,13 @@ async def callback_handler(client: Client, query: CallbackQuery):
         if session["mode"] == "NEW":
             session["state"] = "WAITING_FINAL_CHANNEL"
             session["final_markup"] = final_markup
-            await query.message.reply_text("📢 Channel Username ya ID bhejein:")
+            await query.message.reply_text(
+                "📢 <b>Channel Username ya ID Bhejein:</b>\n\n"
+                "Examples:\n"
+                "• <code>@mychannel</code>\n"
+                "• <code>-100123456789</code>\n"
+                "• <code>https://t.me/mychannel</code>"
+            )
 
         elif session["mode"] == "EDIT":
             try:
@@ -232,21 +300,6 @@ async def callback_handler(client: Client, query: CallbackQuery):
             except Exception as e:
                 await query.message.reply_text(f"❌ Failed to edit: {str(e)}")
             del user_sessions[user_id]
-
-
-@app.on_message(filters.private & filters.create(lambda _, __, m: user_sessions.get(m.from_user.id, {}).get("state") == "WAITING_FINAL_CHANNEL"))
-async def publish_new_post_channel(client: Client, message: Message):
-    user_id = message.from_user.id
-    session = user_sessions[user_id]
-    try:
-        sent = await session["content_msg"].copy(
-            chat_id=message.text.strip(),
-            reply_markup=session["final_markup"]
-        )
-        await message.reply_text(f"🎉 **Post Published!** (Msg ID: `{sent.id if sent else 'Sent'}`)")
-    except Exception as e:
-        await message.reply_text(f"❌ Error: {str(e)}")
-    del user_sessions[user_id]
 
 
 async def main():
