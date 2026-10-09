@@ -1,7 +1,7 @@
 import os
 import re
 import asyncio
-from pyrogram import Client, filters, enums
+from pyrogram import Client, filters, enums, idle
 from pyrogram.types import (
     Message,
     InlineKeyboardMarkup,
@@ -450,7 +450,8 @@ async def main():
     await start_web_server()
     asyncio.create_task(self_ping_loop())
     print("Bot Starting...")
-    app.run()
+    await app.start()
+    await idle()
 
 if __name__ == "__main__":
     loop = asyncio.get_event_loop()
