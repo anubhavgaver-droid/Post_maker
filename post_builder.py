@@ -1,7 +1,7 @@
 import os
 import re
 import asyncio
-from pyrogram import Client, filters
+from pyrogram import Client, filters, enums
 from pyrogram.types import (
     Message,
     InlineKeyboardMarkup,
@@ -33,7 +33,8 @@ def parse_post_link(link: str):
     # Topic Private
     m = re.match(pattern_private_topic, link)
     if m:
-        return int(f"-100{m.group(1)}"), int(m.group(2)), int(m.group(3))
+        chat_id = int(f"-100{m.group(1)}") if not m.group(1).startswith("-100") else int(m.group(1))
+        return chat_id, int(m.group(2)), int(m.group(3))
 
     # Topic Public
     m = re.match(pattern_public_topic, link)
@@ -43,7 +44,8 @@ def parse_post_link(link: str):
     # Channel Private
     m = re.match(pattern_private_channel, link)
     if m:
-        return int(f"-100{m.group(1)}"), None, int(m.group(2))
+        chat_id = int(f"-100{m.group(1)}") if not m.group(1).startswith("-100") else int(m.group(1))
+        return chat_id, None, int(m.group(2))
 
     # Channel Public
     m = re.match(pattern_public_channel, link)
@@ -69,7 +71,7 @@ def parse_channel_input(channel_text: str):
 
     try:
         clean_id = int(text)
-        if not str(clean_id).startswith("-100") and clean_id > 0:
+        if clean_id > 0 and not str(clean_id).startswith("-100"):
             clean_id = int(f"-100{clean_id}")
         return clean_id
     except ValueError:
@@ -78,7 +80,7 @@ def parse_channel_input(channel_text: str):
 
 def build_preview_keyboard(grid_data):
     """
-    Generates inline keyboard with added buttons and ➕ buttons.
+    Generates inline keyboard with style attributes if present.
     """
     keyboard = []
     for r_idx, row in enumerate(grid_data):
@@ -87,7 +89,12 @@ def build_preview_keyboard(grid_data):
             if item is None:
                 row_buttons.append(InlineKeyboardButton("➕", callback_data=f"add_{r_idx}_{c_idx}"))
             else:
-                row_buttons.append(InlineKeyboardButton(item[0], url=item[1]))
+                btn_name, btn_url = item[0], item[1]
+                btn_style = item[2] if len(item) > 2 else None
+                if btn_style:
+                    row_buttons.append(InlineKeyboardButton(btn_name, url=btn_url, style=btn_style))
+                else:
+                    row_buttons.append(InlineKeyboardButton(btn_name, url=btn_url))
         keyboard.append(row_buttons)
 
     keyboard.append([
@@ -95,6 +102,19 @@ def build_preview_keyboard(grid_data):
         InlineKeyboardButton("✅ Publish / Update", callback_data="finish_post")
     ])
     return InlineKeyboardMarkup(keyboard)
+
+
+def style_selection_keyboard():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🟦 Primary", callback_data="style_primary"),
+            InlineKeyboardButton("🟩 Success", callback_data="style_success"),
+        ],
+        [
+            InlineKeyboardButton("🟥 Danger", callback_data="style_danger"),
+            InlineKeyboardButton("⚪ Normal", callback_data="style_normal"),
+        ]
+    ])
 
 
 # ----------------- COMMAND HANDLERS -----------------
@@ -226,7 +246,11 @@ async def message_handler(client: Client, message: Message):
             existing_grid = []
             if target_msg.reply_markup and target_msg.reply_markup.inline_keyboard:
                 for row in target_msg.reply_markup.inline_keyboard:
-                    row_items = [(b.text, b.url) for b in row if b.url]
+                    row_items = []
+                    for b in row:
+                        if b.url:
+                            b_style = getattr(b, "style", None)
+                            row_items.append((b.text, b.url, b_style))
                     if row_items:
                         if len(row_items) < 3:
                             row_items.append(None)
@@ -248,8 +272,12 @@ async def message_handler(client: Client, message: Message):
     # 3. Button Name
     elif state == "WAITING_BTN_NAME":
         session["temp_name"] = message.text.strip()
-        session["state"] = "WAITING_BTN_URL"
-        await message.reply_text(f"✅ Name: <b>{session['temp_name']}</b>\n🔗 Ab URL Link bhejein:")
+        session["state"] = "WAITING_STYLE_CHOICE"
+        await message.reply_text(
+            f"✅ Button Name: <b>{session['temp_name']}</b>\n\n"
+            "🎨 **Button ka Style Select Karein:**",
+            reply_markup=style_selection_keyboard()
+        )
 
     # 4. Button URL
     elif state == "WAITING_BTN_URL":
@@ -259,7 +287,10 @@ async def message_handler(client: Client, message: Message):
             return
 
         r, c = session["target_pos"]
-        session["grid"][r][c] = (session["temp_name"], url)
+        btn_name = session["temp_name"]
+        btn_style = session.get("selected_style", None)
+
+        session["grid"][r][c] = (btn_name, url, btn_style)
         if len(session["grid"][r]) < 3 and session["grid"][r][-1] is not None:
             session["grid"][r].append(None)
 
@@ -272,7 +303,7 @@ async def message_handler(client: Client, message: Message):
             )
         except Exception:
             pass
-        await message.reply_text("✨ Button added to preview!")
+        await message.reply_text("✨ Button added with style!")
 
     # 5. Final Publishing (Channel)
     elif state == "WAITING_FINAL_CHANNEL":
@@ -349,6 +380,21 @@ async def callback_handler(client: Client, query: CallbackQuery):
         await query.answer()
         await query.message.reply_text(f"➕ Button Name (Row {int(r)+1}, Col {int(c)+1}) bhejein:")
 
+    elif data.startswith("style_"):
+        await query.answer()
+
+        if data == "style_primary":
+            session["selected_style"] = enums.ButtonStyle.PRIMARY
+        elif data == "style_success":
+            session["selected_style"] = getattr(enums.ButtonStyle, "SUCCESS", getattr(enums.ButtonStyle, "POSITIVE", None))
+        elif data == "style_danger":
+            session["selected_style"] = enums.ButtonStyle.DANGER
+        else:
+            session["selected_style"] = None
+
+        session["state"] = "WAITING_BTN_URL"
+        await query.message.edit_text("✅ Style selected!\n\n🔗 **Ab URL Link bhejein:**")
+
     elif data == "add_row":
         session["grid"].append([None])
         await query.message.edit_reply_markup(reply_markup=build_preview_keyboard(session["grid"]))
@@ -360,7 +406,16 @@ async def callback_handler(client: Client, query: CallbackQuery):
         for row in session["grid"]:
             valid_row = [btn for btn in row if btn is not None]
             if valid_row:
-                final_grid.append([InlineKeyboardButton(b[0], url=b[1]) for b in valid_row])
+                row_btns = []
+                for b in valid_row:
+                    b_name, b_url = b[0], b[1]
+                    b_style = b[2] if len(b) > 2 else None
+                    if b_style:
+                        row_btns.append(InlineKeyboardButton(b_name, url=b_url, style=b_style))
+                    else:
+                        row_btns.append(InlineKeyboardButton(b_name, url=b_url))
+                final_grid.append(row_btns)
+
         final_markup = InlineKeyboardMarkup(final_grid) if final_grid else None
         session["final_markup"] = final_markup
 
@@ -395,8 +450,7 @@ async def main():
     await start_web_server()
     asyncio.create_task(self_ping_loop())
     print("Bot Starting...")
-    await app.start()
-    await asyncio.Event().wait()
+    app.run()
 
 if __name__ == "__main__":
     loop = asyncio.get_event_loop()
