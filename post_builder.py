@@ -279,8 +279,10 @@ async def message_handler(client: Client, message: Message):
         channel_input = parse_channel_input(message.text.strip())
         try:
             content_msg: Message = session["content_msg"]
-            sent = await content_msg.copy(
+            sent = await client.copy_message(
                 chat_id=channel_input,
+                from_chat_id=content_msg.chat.id,
+                message_id=content_msg.id,
                 reply_markup=session["final_markup"]
             )
             await message.reply_text(
@@ -309,9 +311,11 @@ async def message_handler(client: Client, message: Message):
 
         try:
             content_msg: Message = session["content_msg"]
-            sent = await content_msg.copy(
+            sent = await client.copy_message(
                 chat_id=chat_id,
-                message_thread_id=thread_id,
+                from_chat_id=content_msg.chat.id,
+                message_id=content_msg.id,
+                reply_to_message_id=thread_id,
                 reply_markup=session["final_markup"]
             )
             await message.reply_text(
