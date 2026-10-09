@@ -14,31 +14,48 @@ from server import start_web_server, self_ping_loop
 
 app = Client("interactive_post_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
+# Global session dictionary
 user_sessions = {}
 
 
+# ----------------- HELPER FUNCTIONS -----------------
+
 def parse_post_link(link: str):
-    pattern_public = r"https?://t\.me/([^/]+)/(\d+)"
-    pattern_private = r"https?://t\.me/c/(\d+)/(\d+)"
+    """
+    Parses Normal Channel Posts & Topic Group Posts.
+    Returns: (chat_id, thread_id, msg_id)
+    """
+    pattern_private_topic = r"https?://t\.me/c/(\d+)/(\d+)/(\d+)"
+    pattern_public_topic = r"https?://t\.me/([^/]+)/(\d+)/(\d+)"
+    pattern_private_channel = r"https?://t\.me/c/(\d+)/(\d+)"
+    pattern_public_channel = r"https?://t\.me/([^/]+)/(\d+)"
 
-    match_priv = re.match(pattern_private, link)
-    if match_priv:
-        return int(f"-100{match_priv.group(1)}"), int(match_priv.group(2))
+    # Topic Private
+    m = re.match(pattern_private_topic, link)
+    if m:
+        return int(f"-100{m.group(1)}"), int(m.group(2)), int(m.group(3))
 
-    match_pub = re.match(pattern_public, link)
-    if match_pub:
-        return f"@{match_pub.group(1)}", int(match_pub.group(2))
+    # Topic Public
+    m = re.match(pattern_public_topic, link)
+    if m:
+        return f"@{m.group(1)}", int(m.group(2)), int(m.group(3))
 
-    return None, None
+    # Channel Private
+    m = re.match(pattern_private_channel, link)
+    if m:
+        return int(f"-100{m.group(1)}"), None, int(m.group(2))
+
+    # Channel Public
+    m = re.match(pattern_public_channel, link)
+    if m:
+        return f"@{m.group(1)}", None, int(m.group(2))
+
+    return None, None, None
 
 
 def parse_channel_input(channel_text: str):
     """
-    Cleans and formats channel username or ID:
-    - @username -> '@username'
-    - -100123456789 -> -100123456789 (int)
-    - 123456789 -> -100123456789 (int)
-    - https://t.me/username -> '@username'
+    Formats channel username or numeric ID properly.
     """
     text = channel_text.strip()
     if text.startswith("https://t.me/"):
@@ -60,6 +77,9 @@ def parse_channel_input(channel_text: str):
 
 
 def build_preview_keyboard(grid_data):
+    """
+    Generates inline keyboard with added buttons and ➕ buttons.
+    """
     keyboard = []
     for r_idx, row in enumerate(grid_data):
         row_buttons = []
@@ -77,15 +97,19 @@ def build_preview_keyboard(grid_data):
     return InlineKeyboardMarkup(keyboard)
 
 
+# ----------------- COMMAND HANDLERS -----------------
+
 @app.on_message(filters.command("start") & filters.private)
 async def start_cmd(client: Client, message: Message):
     if message.from_user.id not in ADMIN_IDS:
         return
     await message.reply_text(
         "<b>👋 Interactive Post Builder & Editor Bot!</b>\n\n"
-        "➡️ /newpost - Nayi post UI builder se banayein\n"
-        "➡️ /editpost - Link se post edit karein (auto-refresh)\n"
-        "➡️ /cancel - Cancel process"
+        "➡️ /newpost - Channel post UI builder se banayein\n"
+        "➡️ /editpost - Channel post edit / refresh karein\n"
+        "➡️ /topicpost - Topic Group Thread mein post bhejein\n"
+        "➡️ /edittopic - Topic Group post edit / refresh karein\n"
+        "➡️ /cancel - Current process cancel karein"
     )
 
 
@@ -112,7 +136,7 @@ async def newpost_cmd(client: Client, message: Message):
         "state": "WAITING_TITLE",
         "preview_msg_id": None
     }
-    await message.reply_text("<b>📝 Post Content / Message bhejein:</b>")
+    await message.reply_text("<b>📝 Channel Post Content / Message bhejein:</b>")
 
 
 @app.on_message(filters.command("editpost") & filters.private)
@@ -130,9 +154,40 @@ async def editpost_cmd(client: Client, message: Message):
     await message.reply_text("<b>🔗 Channel Post Ka Link Bhejein:</b>\n(e.g. <code>https://t.me/mychannel/123</code>)")
 
 
-# ---------------- MAIN MESSAGE ROUTER ----------------
+@app.on_message(filters.command("topicpost") & filters.private)
+async def topicpost_cmd(client: Client, message: Message):
+    user_id = message.from_user.id
+    if user_id not in ADMIN_IDS:
+        return
 
-@app.on_message(filters.private & ~filters.command(["start", "cancel", "newpost", "editpost"]))
+    user_sessions[user_id] = {
+        "mode": "TOPIC_NEW",
+        "text": "",
+        "grid": [[None]],
+        "state": "WAITING_TITLE",
+        "preview_msg_id": None
+    }
+    await message.reply_text("<b>💬 Topic Group Post Content / Message bhejein:</b>")
+
+
+@app.on_message(filters.command("edittopic") & filters.private)
+async def edittopic_cmd(client: Client, message: Message):
+    user_id = message.from_user.id
+    if user_id not in ADMIN_IDS:
+        return
+
+    user_sessions[user_id] = {
+        "mode": "TOPIC_EDIT",
+        "grid": [],
+        "state": "WAITING_POST_LINK",
+        "preview_msg_id": None
+    }
+    await message.reply_text("<b>🔗 Topic Post Ka Link Bhejein:</b>\n(e.g. <code>https://t.me/c/123456/45/678</code>)")
+
+
+# ----------------- MAIN MESSAGE ROUTER -----------------
+
+@app.on_message(filters.private & ~filters.command(["start", "cancel", "newpost", "editpost", "topicpost", "edittopic"]))
 async def message_handler(client: Client, message: Message):
     user_id = message.from_user.id
     if user_id not in user_sessions:
@@ -141,7 +196,7 @@ async def message_handler(client: Client, message: Message):
     session = user_sessions[user_id]
     state = session.get("state")
 
-    # 1. Post Content
+    # 1. Post Content Title
     if state == "WAITING_TITLE":
         session["text"] = message.text or message.caption or "Untitled Post"
         session["content_msg"] = message
@@ -150,11 +205,11 @@ async def message_handler(client: Client, message: Message):
         sent = await message.reply_text(f"<b>🔍 Live Preview:</b>\n\n{session['text']}", reply_markup=markup)
         session["preview_msg_id"] = sent.id
 
-    # 2. Edit Post Link
+    # 2. Fetch Post Link (For Channel OR Topic Edit)
     elif state == "WAITING_POST_LINK":
-        chat_id, msg_id = parse_post_link(message.text.strip())
+        chat_id, thread_id, msg_id = parse_post_link(message.text.strip())
         if not chat_id or not msg_id:
-            await message.reply_text("⚠️ Invalid Telegram Post Link!")
+            await message.reply_text("⚠️ Invalid Telegram Post Link! Sahi link bhejein.")
             return
 
         try:
@@ -164,6 +219,7 @@ async def message_handler(client: Client, message: Message):
                 return
 
             session["target_chat"] = chat_id
+            session["message_thread_id"] = thread_id
             session["target_msg_id"] = msg_id
             session["text"] = target_msg.text or target_msg.caption or "Post Content"
 
@@ -216,12 +272,11 @@ async def message_handler(client: Client, message: Message):
             )
         except Exception:
             pass
-        await message.reply_text("✨ Button added!")
+        await message.reply_text("✨ Button added to preview!")
 
-    # 5. Final Publishing Step (FIXED!)
+    # 5. Final Publishing (Channel)
     elif state == "WAITING_FINAL_CHANNEL":
         channel_input = parse_channel_input(message.text.strip())
-
         try:
             content_msg: Message = session["content_msg"]
             sent = await content_msg.copy(
@@ -234,18 +289,44 @@ async def message_handler(client: Client, message: Message):
                 f"🆔 <b>Message ID:</b> <code>{(sent.id if sent else 'Sent')}</code>"
             )
         except Exception as e:
-            await message.reply_text(
-                f"❌ <b>Publishing Failed!</b>\n\n"
-                f"<b>Reason:</b> <code>{str(e)}</code>\n\n"
-                "<i>Kripya check karein:\n"
-                "1. Bot us channel mein Admin hai ya nahi.\n"
-                "2. Channel ID / Username sahi hai ya nahi.</i>"
+            await message.reply_text(f"❌ <b>Publishing Failed:</b> <code>{str(e)}</code>")
+
+        del user_sessions[user_id]
+
+    # 6. Final Publishing (Topic Group)
+    elif state == "WAITING_TOPIC_INPUT":
+        input_text = message.text.strip()
+        chat_id, thread_id, _ = parse_post_link(input_text)
+
+        if not chat_id or not thread_id:
+            try:
+                parts = input_text.split(",")
+                chat_id = parse_channel_input(parts[0].strip())
+                thread_id = int(parts[1].strip())
+            except Exception:
+                await message.reply_text("⚠️ Invalid Topic Input! Topic Link ya `GroupID, TopicID` format mein bhejein.")
+                return
+
+        try:
+            content_msg: Message = session["content_msg"]
+            sent = await content_msg.copy(
+                chat_id=chat_id,
+                message_thread_id=thread_id,
+                reply_markup=session["final_markup"]
             )
+            await message.reply_text(
+                f"🎉 <b>Topic Post Successfully Published!</b>\n\n"
+                f"📍 <b>Group:</b> <code>{chat_id}</code>\n"
+                f"💬 <b>Topic ID:</b> <code>{thread_id}</code>\n"
+                f"🆔 <b>Message ID:</b> <code>{(sent.id if sent else 'Sent')}</code>"
+            )
+        except Exception as e:
+            await message.reply_text(f"❌ <b>Topic Publishing Failed:</b> <code>{str(e)}</code>")
 
         del user_sessions[user_id]
 
 
-# ---------------- CALLBACK HANDLER ----------------
+# ----------------- CALLBACK QUERY HANDLER -----------------
 
 @app.on_callback_query()
 async def callback_handler(client: Client, query: CallbackQuery):
@@ -277,28 +358,32 @@ async def callback_handler(client: Client, query: CallbackQuery):
             if valid_row:
                 final_grid.append([InlineKeyboardButton(b[0], url=b[1]) for b in valid_row])
         final_markup = InlineKeyboardMarkup(final_grid) if final_grid else None
+        session["final_markup"] = final_markup
 
-        if session["mode"] == "NEW":
+        mode = session["mode"]
+
+        if mode == "NEW":
             session["state"] = "WAITING_FINAL_CHANNEL"
-            session["final_markup"] = final_markup
+            await query.message.reply_text("📢 <b>Channel Username ya ID Bhejein:</b>\n(e.g. <code>@mychannel</code> ya <code>-100123456789</code>)")
+
+        elif mode == "TOPIC_NEW":
+            session["state"] = "WAITING_TOPIC_INPUT"
             await query.message.reply_text(
-                "📢 <b>Channel Username ya ID Bhejein:</b>\n\n"
-                "Examples:\n"
-                "• <code>@mychannel</code>\n"
-                "• <code>-100123456789</code>\n"
-                "• <code>https://t.me/mychannel</code>"
+                "💬 <b>Topic Details Bhejein:</b>\n\n"
+                "• Topic Message ka Direct Link (e.g. <code>https://t.me/c/123456/45/678</code>)\n"
+                "• Ya Group ID, Topic ID (e.g. <code>-100123456789, 45</code>)"
             )
 
-        elif session["mode"] == "EDIT":
+        elif mode in ["EDIT", "TOPIC_EDIT"]:
             try:
                 await client.edit_message_reply_markup(
                     chat_id=session["target_chat"],
                     message_id=session["target_msg_id"],
                     reply_markup=final_markup
                 )
-                await query.message.reply_text("🎉 **Channel Post Successfully Refreshed & Updated!**")
+                await query.message.reply_text("🎉 **Post / Topic Post Live Refreshed & Updated!**")
             except Exception as e:
-                await query.message.reply_text(f"❌ Failed to edit: {str(e)}")
+                await query.message.reply_text(f"❌ Failed to edit post: {str(e)}")
             del user_sessions[user_id]
 
 
