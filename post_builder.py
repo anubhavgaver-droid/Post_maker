@@ -6,6 +6,7 @@ from pyrogram.types import (
     Message,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
+    ReplyKeyboardMarkup,
     CallbackQuery
 )
 
@@ -16,6 +17,26 @@ app = Client("interactive_post_bot", api_id=API_ID, api_hash=API_HASH, bot_token
 
 # Global session dictionary
 user_sessions = {}
+
+
+# ----------------- CUSTOM REPLY KEYBOARDS -----------------
+
+def main_menu_keyboard():
+    return ReplyKeyboardMarkup(
+        [
+            ["📝 New Post", "🔗 Edit Post"],
+            ["💬 Topic Post", "✏️ Edit Topic"]
+        ],
+        resize_keyboard=True
+    )
+
+def cancel_only_keyboard():
+    return ReplyKeyboardMarkup(
+        [
+            ["❌ Cancel Process"]
+        ],
+        resize_keyboard=True
+    )
 
 
 # ----------------- HELPER FUNCTIONS -----------------
@@ -92,6 +113,9 @@ def build_preview_keyboard(grid_data):
 
 
 def style_selection_keyboard():
+    """
+    Inline color/style selection buttons (Primary, Success, Danger, Normal)
+    """
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton("🟦 Primary", callback_data="style_primary"),
@@ -104,41 +128,36 @@ def style_selection_keyboard():
     ])
 
 
-# ----------------- COMMAND HANDLERS -----------------
+# ----------------- COMMAND & MENU HANDLERS -----------------
 
 @app.on_message(filters.command("start") & filters.private)
 async def start_cmd(client: Client, message: Message):
     if message.from_user.id not in ADMIN_IDS:
         return
     await message.reply_text(
-        "<b>👋 Interactive Post Builder & Editor Bot!</b>\n\n"
-        "✨ <i>Telegram Premium Emoji & Style Supported</i>\n\n"
-        "➡️ /newpost - Channel post UI builder\n"
-        "➡️ /editpost - Channel post edit / refresh\n"
-        "➡️ /topicpost - Topic Group Thread post\n"
-        "➡️ /edittopic - Topic Group post edit\n"
-        "➡️ /cancel - Cancel process"
+        "<b>👋 Welcome to Interactive Post Builder Bot!</b>\n\n"
+        "Neeche diye gaye buttons se apna action select karein:",
+        reply_markup=main_menu_keyboard()
     )
 
 
-@app.on_message(filters.command("cancel") & filters.private)
+@app.on_message((filters.regex("❌ Cancel Process") | filters.command("cancel")) & filters.private)
 async def cancel_cmd(client: Client, message: Message):
     user_id = message.from_user.id
     if user_id in user_sessions:
         del user_sessions[user_id]
-        await message.reply_text("❌ Operation cancelled.")
-    else:
-        await message.reply_text("Koi active session nahi hai.")
+    await message.reply_text(
+        "❌ Operation cancelled.",
+        reply_markup=main_menu_keyboard()
+    )
 
 
+@app.on_message(filters.regex("📝 New Post") & filters.private)
 @app.on_message(filters.command("newpost") & filters.private)
 async def newpost_cmd(client: Client, message: Message):
     user_id = message.from_user.id
     if user_id not in ADMIN_IDS:
         return
-
-    is_prem = message.from_user.is_premium
-    prem_status = "✨ <b>[Telegram Premium Detected: Emoji Enabled]</b>" if is_prem else "ℹ️ <i>Normal Account</i>"
 
     user_sessions[user_id] = {
         "mode": "NEW",
@@ -146,11 +165,15 @@ async def newpost_cmd(client: Client, message: Message):
         "grid": [[None]],
         "state": "WAITING_TITLE",
         "preview_msg_id": None,
-        "is_premium": is_prem
+        "is_premium": message.from_user.is_premium
     }
-    await message.reply_text(f"{prem_status}\n\n<b>📝 Channel Post Content / Message bhejein (Emojis allowed):</b>")
+    await message.reply_text(
+        "<b>📝 Channel Post Content / Message bhejein:</b>",
+        reply_markup=cancel_only_keyboard()
+    )
 
 
+@app.on_message(filters.regex("🔗 Edit Post") & filters.private)
 @app.on_message(filters.command("editpost") & filters.private)
 async def editpost_cmd(client: Client, message: Message):
     user_id = message.from_user.id
@@ -164,9 +187,13 @@ async def editpost_cmd(client: Client, message: Message):
         "preview_msg_id": None,
         "is_premium": message.from_user.is_premium
     }
-    await message.reply_text("<b>🔗 Channel Post Ka Link Bhejein:</b>\n(e.g. <code>https://t.me/mychannel/123</code>)")
+    await message.reply_text(
+        "<b>🔗 Channel Post Ka Link Bhejein:</b>\n(e.g. <code>https://t.me/mychannel/123</code>)",
+        reply_markup=cancel_only_keyboard()
+    )
 
 
+@app.on_message(filters.regex("💬 Topic Post") & filters.private)
 @app.on_message(filters.command("topicpost") & filters.private)
 async def topicpost_cmd(client: Client, message: Message):
     user_id = message.from_user.id
@@ -181,9 +208,13 @@ async def topicpost_cmd(client: Client, message: Message):
         "preview_msg_id": None,
         "is_premium": message.from_user.is_premium
     }
-    await message.reply_text("<b>💬 Topic Group Post Content / Message bhejein:</b>")
+    await message.reply_text(
+        "<b>💬 Topic Group Post Content / Message bhejein:</b>",
+        reply_markup=cancel_only_keyboard()
+    )
 
 
+@app.on_message(filters.regex("✏️ Edit Topic") & filters.private)
 @app.on_message(filters.command("edittopic") & filters.private)
 async def edittopic_cmd(client: Client, message: Message):
     user_id = message.from_user.id
@@ -197,12 +228,15 @@ async def edittopic_cmd(client: Client, message: Message):
         "preview_msg_id": None,
         "is_premium": message.from_user.is_premium
     }
-    await message.reply_text("<b>🔗 Topic Post Ka Link Bhejein:</b>\n(e.g. <code>https://t.me/c/123456/45/678</code>)")
+    await message.reply_text(
+        "<b>🔗 Topic Post Ka Link Bhejein:</b>\n(e.g. <code>https://t.me/c/123456/45/678</code>)",
+        reply_markup=cancel_only_keyboard()
+    )
 
 
 # ----------------- MAIN MESSAGE ROUTER -----------------
 
-@app.on_message(filters.private & ~filters.command(["start", "cancel", "newpost", "editpost", "topicpost", "edittopic"]))
+@app.on_message(filters.private & ~filters.command(["start", "cancel", "newpost", "editpost", "topicpost", "edittopic"]) & ~filters.regex("^(📝 New Post|🔗 Edit Post|💬 Topic Post|✏️ Edit Topic|❌ Cancel Process)$"))
 async def message_handler(client: Client, message: Message):
     user_id = message.from_user.id
     if user_id not in user_sessions:
@@ -211,13 +245,16 @@ async def message_handler(client: Client, message: Message):
     session = user_sessions[user_id]
     state = session.get("state")
 
-    # 1. Post Content Title (Supports text / entities / emojis)
+    # 1. Post Content Title
     if state == "WAITING_TITLE":
         session["text"] = message.text or message.caption or "Untitled Post"
         session["content_msg"] = message
         session["state"] = "BUILDING"
         markup = build_preview_keyboard(session["grid"])
-        sent = await message.reply_text(f"<b>🔍 Live Preview:</b>\n\n{session['text']}", reply_markup=markup)
+        sent = await message.reply_text(
+            f"<b>🔍 Live Preview:</b>\n\n{session['text']}", 
+            reply_markup=markup
+        )
         session["preview_msg_id"] = sent.id
 
     # 2. Fetch Post Link
@@ -259,21 +296,23 @@ async def message_handler(client: Client, message: Message):
             session["grid"] = existing_grid
             session["state"] = "BUILDING"
             markup = build_preview_keyboard(session["grid"])
-            sent = await message.reply_text(f"<b>✏️ Live Edit Preview:</b>\n\n{session['text']}", reply_markup=markup)
+            sent = await message.reply_text(
+                f"<b>✏️ Live Edit Preview:</b>\n\n{session['text']}", 
+                reply_markup=markup
+            )
             session["preview_msg_id"] = sent.id
         except Exception as e:
             await message.reply_text(f"❌ Error: {str(e)}")
 
-    # 3. Button Name (Allows Emojis if Premium)
+    # 3. Button Name
     elif state == "WAITING_BTN_NAME":
-        btn_name = message.text.strip()
-        session["temp_name"] = btn_name
+        session["temp_name"] = message.text.strip()
         session["state"] = "WAITING_STYLE_CHOICE"
         
-        prem_note = "✨ <i>(Premium Emoji Supported)</i>" if session.get("is_premium") else ""
+        # Inline keyboard for color selection
         await message.reply_text(
-            f"✅ Button Name: <b>{session['temp_name']}</b> {prem_note}\n\n"
-            "🎨 **Button ka Style Select Karein:**",
+            f"✅ Button Name: <b>{session['temp_name']}</b>\n\n"
+            "🎨 **Inline Button ka Style Select Karein:**",
             reply_markup=style_selection_keyboard()
         )
 
@@ -317,10 +356,14 @@ async def message_handler(client: Client, message: Message):
             await message.reply_text(
                 f"🎉 <b>Post Successfully Published!</b>\n\n"
                 f"📍 <b>Target:</b> <code>{channel_input}</code>\n"
-                f"🆔 <b>Message ID:</b> <code>{(sent.id if sent else 'Sent')}</code>"
+                f"🆔 <b>Message ID:</b> <code>{(sent.id if sent else 'Sent')}</code>",
+                reply_markup=main_menu_keyboard()
             )
         except Exception as e:
-            await message.reply_text(f"❌ <b>Publishing Failed:</b> <code>{str(e)}</code>")
+            await message.reply_text(
+                f"❌ <b>Publishing Failed:</b> <code>{str(e)}</code>",
+                reply_markup=main_menu_keyboard()
+            )
 
         del user_sessions[user_id]
 
@@ -351,10 +394,14 @@ async def message_handler(client: Client, message: Message):
                 f"🎉 <b>Topic Post Successfully Published!</b>\n\n"
                 f"📍 <b>Group:</b> <code>{chat_id}</code>\n"
                 f"💬 <b>Topic ID:</b> <code>{thread_id}</code>\n"
-                f"🆔 <b>Message ID:</b> <code>{(sent.id if sent else 'Sent')}</code>"
+                f"🆔 <b>Message ID:</b> <code>{(sent.id if sent else 'Sent')}</code>",
+                reply_markup=main_menu_keyboard()
             )
         except Exception as e:
-            await message.reply_text(f"❌ <b>Topic Publishing Failed:</b> <code>{str(e)}</code>")
+            await message.reply_text(
+                f"❌ <b>Topic Publishing Failed:</b> <code>{str(e)}</code>",
+                reply_markup=main_menu_keyboard()
+            )
 
         del user_sessions[user_id]
 
@@ -425,7 +472,6 @@ async def callback_handler(client: Client, query: CallbackQuery):
 
         elif mode == "TOPIC_NEW":
             session["state"] = "WAITING_TOPIC_INPUT"
-            await query.answer()
             await query.message.reply_text(
                 "💬 <b>Topic Details Bhejein:</b>\n\n"
                 "• Topic Message ka Direct Link (e.g. <code>https://t.me/c/123456/45/678</code>)\n"
@@ -439,9 +485,15 @@ async def callback_handler(client: Client, query: CallbackQuery):
                     message_id=session["target_msg_id"],
                     reply_markup=final_markup
                 )
-                await query.message.reply_text("🎉 **Post / Topic Post Live Refreshed & Updated!**")
+                await query.message.reply_text(
+                    "🎉 **Post / Topic Post Live Refreshed & Updated!**",
+                    reply_markup=main_menu_keyboard()
+                )
             except Exception as e:
-                await query.message.reply_text(f"❌ Failed to edit post: {str(e)}")
+                await query.message.reply_text(
+                    f"❌ Failed to edit post: {str(e)}",
+                    reply_markup=main_menu_keyboard()
+                )
             del user_sessions[user_id]
 
 
