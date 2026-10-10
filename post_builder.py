@@ -113,9 +113,6 @@ def build_preview_keyboard(grid_data):
 
 
 def style_selection_keyboard():
-    """
-    Inline color/style selection buttons (Primary, Success, Danger, Normal)
-    """
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton("🟦 Primary", callback_data="style_primary"),
@@ -309,14 +306,13 @@ async def message_handler(client: Client, message: Message):
         session["temp_name"] = message.text.strip()
         session["state"] = "WAITING_STYLE_CHOICE"
         
-        # Inline keyboard for color selection
         await message.reply_text(
             f"✅ Button Name: <b>{session['temp_name']}</b>\n\n"
-            "🎨 **Inline Button ka Style Select Karein:**",
+            "🎨 **Button ka Style Select Karein:**",
             reply_markup=style_selection_keyboard()
         )
 
-    # 4. Button URL
+    # 4. Button URL (Ab yahan naya preview message neeche bhejega)
     elif state == "WAITING_BTN_URL":
         url = message.text.strip()
         if not (url.startswith("http://") or url.startswith("https://") or url.startswith("t.me/")):
@@ -332,15 +328,14 @@ async def message_handler(client: Client, message: Message):
             session["grid"][r].append(None)
 
         session["state"] = "BUILDING"
-        try:
-            await client.edit_message_reply_markup(
-                chat_id=message.chat.id,
-                message_id=session["preview_msg_id"],
-                reply_markup=build_preview_keyboard(session["grid"])
-            )
-        except Exception:
-            pass
-        await message.reply_text("✨ Button added successfully!")
+        
+        # Naya preview message chat ke bilkul neeche send karein
+        markup = build_preview_keyboard(session["grid"])
+        sent = await message.reply_text(
+            f"✨ **Button Added Successfully!**\n\n<b>🔍 Current Live Preview:</b>\n\n{session['text']}",
+            reply_markup=markup
+        )
+        session["preview_msg_id"] = sent.id
 
     # 5. Final Publishing (Channel)
     elif state == "WAITING_FINAL_CHANNEL":
@@ -442,8 +437,15 @@ async def callback_handler(client: Client, query: CallbackQuery):
 
     elif data == "add_row":
         session["grid"].append([None])
-        await query.message.edit_reply_markup(reply_markup=build_preview_keyboard(session["grid"]))
         await query.answer("New Row added!")
+        
+        # Nayi row add hone par bhi naya preview message neeche bhej dega
+        markup = build_preview_keyboard(session["grid"])
+        sent = await query.message.reply_text(
+            f"➕ **New Row Added!**\n\n<b>🔍 Current Live Preview:</b>\n\n{session['text']}",
+            reply_markup=markup
+        )
+        session["preview_msg_id"] = sent.id
 
     elif data == "finish_post":
         await query.answer()
