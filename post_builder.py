@@ -10,6 +10,7 @@ from pyrogram.types import (
     CallbackQuery
 )
 from motor.motor_asyncio import AsyncIOMotorClient
+from bson import ObjectId
 
 from config import API_ID, API_HASH, BOT_TOKEN, ADMIN_IDS, MONGO_URI
 from server import start_web_server, self_ping_loop
@@ -19,10 +20,11 @@ app = Client("interactive_post_bot", api_id=API_ID, api_hash=API_HASH, bot_token
 # Global session dictionary
 user_sessions = {}
 
-# MongoDB Setup
+# MongoDB Setup (Separate Collections for Channels and Topics)
 mongo_client = AsyncIOMotorClient(MONGO_URI)
 db = mongo_client["interactive_post_bot_db"]
 channels_collection = db["saved_channels"]
+topics_collection = db["saved_topics"]
 
 
 # ----------------- CUSTOM REPLY KEYBOARDS -----------------
@@ -32,7 +34,7 @@ def main_menu_keyboard():
         [
             ["📝 New Post", "🔗 Edit Post"],
             ["💬 Topic Post", "✏️ Edit Topic"],
-            ["📢 Manage Channels"]
+            ["📢 Channels", "💬 Topics"]
         ],
         resize_keyboard=True
     )
@@ -142,7 +144,22 @@ async def get_saved_channels_keyboard(user_id: int):
         ch_id = ch.get("chat_id")
         keyboard.append([InlineKeyboardButton(f"📢 {ch_name}", callback_data=f"sel_ch_{ch_id}")])
     
-    keyboard.append([InlineKeyboardButton("➕ Add New / Custom Channel", callback_data="sel_ch_custom")])
+    keyboard.append([InlineKeyboardButton("➕ Custom Channel", callback_data="sel_ch_custom")])
+    return InlineKeyboardMarkup(keyboard)
+
+
+async def get_saved_topics_keyboard(user_id: int):
+    cursor = topics_collection.find({"user_id": user_id})
+    topics = await cursor.to_list(length=None)
+    
+    keyboard = []
+    for tp in topics:
+        tp_name = tp.get("name")
+        chat_id = tp.get("chat_id")
+        thread_id = tp.get("thread_id")
+        keyboard.append([InlineKeyboardButton(f"💬 {tp_name}", callback_data=f"sel_tp_{chat_id}_{thread_id}")])
+    
+    keyboard.append([InlineKeyboardButton("➕ Custom Topic Link", callback_data="sel_tp_custom")])
     return InlineKeyboardMarkup(keyboard)
 
 
@@ -252,24 +269,61 @@ async def edittopic_cmd(client: Client, message: Message):
     )
 
 
-@app.on_message(filters.regex("📢 Manage Channels") & filters.private)
-async def manage_channels_cmd(client: Client, message: Message):
+# --- MANAGE CHANNELS MENU ---
+@app.on_message(filters.regex("📢 Channels") & filters.private)
+async def manage_channels_menu(client: Client, message: Message):
     user_id = message.from_user.id
     if user_id not in ADMIN_IDS:
         return
     
-    user_sessions[user_id] = {"state": "WAITING_NEW_CHANNEL_DETAILS"}
+    cursor = channels_collection.find({"user_id": user_id})
+    channels = await cursor.to_list(length=None)
+    
+    keyboard = []
+    for ch in channels:
+        ch_name = ch.get("name")
+        db_id = str(ch.get("_id"))
+        keyboard.append([
+            InlineKeyboardButton(f"📢 {ch_name}", callback_data="ignore_ch"),
+            InlineKeyboardButton("❌ Delete", callback_data=f"del_ch_{db_id}")
+        ])
+    keyboard.append([InlineKeyboardButton("➕ Add New Channel", callback_data="add_new_ch_prompt")])
+    
     await message.reply_text(
-        "📢 **Add New Channel / Group:**\n\n"
-        "Apne channel ka naam aur username/ID is format mein bhejein:\n"
-        "`Channel Name, @username_or_id`",
-        reply_markup=cancel_only_keyboard()
+        "📢 **Manage Saved Channels:**\n\nNeeche aapke saved channels ki list hai:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+# --- MANAGE TOPICS MENU ---
+@app.on_message(filters.regex("💬 Topics") & filters.private)
+async def manage_topics_menu(client: Client, message: Message):
+    user_id = message.from_user.id
+    if user_id not in ADMIN_IDS:
+        return
+    
+    cursor = topics_collection.find({"user_id": user_id})
+    topics = await cursor.to_list(length=None)
+    
+    keyboard = []
+    for tp in topics:
+        tp_name = tp.get("name")
+        db_id = str(tp.get("_id"))
+        keyboard.append([
+            InlineKeyboardButton(f"💬 {tp_name}", callback_data="ignore_tp"),
+            InlineKeyboardButton("❌ Delete", callback_data=f"del_tp_{db_id}")
+        ])
+    keyboard.append([InlineKeyboardButton("➕ Add New Topic", callback_data="add_new_tp_prompt")])
+    
+    await message.reply_text(
+        "💬 **Manage Saved Group Topics:**\n\nNeeche aapke saved topics ki list hai:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
 
 # ----------------- MAIN MESSAGE ROUTER -----------------
 
-@app.on_message(filters.private & ~filters.command(["start", "cancel", "newpost", "editpost", "topicpost", "edittopic"]) & ~filters.regex("^(📝 New Post|🔗 Edit Post|💬 Topic Post|✏️ Edit Topic|📢 Manage Channels|❌ Cancel Process)$"))
+@app.on_message(filters.private & ~filters.command(["start", "cancel", "newpost", "editpost", "topicpost", "edittopic"]) & ~filters.regex("^(📝 New Post|🔗 Edit Post|💬 Topic Post|✏️ Edit Topic|📢 Channels|💬 Topics|❌ Cancel Process)$"))
 async def message_handler(client: Client, message: Message):
     user_id = message.from_user.id
     if user_id not in user_sessions:
@@ -278,23 +332,40 @@ async def message_handler(client: Client, message: Message):
     session = user_sessions[user_id]
     state = session.get("state")
 
-    if state == "WAITING_NEW_CHANNEL_DETAILS":
+    if state == "WAITING_NEW_CHANNEL":
         try:
             parts = message.text.split(",")
             ch_name = parts[0].strip()
             ch_input = parse_channel_input(parts[1].strip())
-
             await channels_collection.update_one(
                 {"user_id": user_id, "chat_id": str(ch_input)},
                 {"$set": {"name": ch_name, "chat_id": str(ch_input)}},
                 upsert=True
             )
-            await message.reply_text(
-                f"✅ **Channel Successfully Saved!**\n\n📢 Name: {ch_name}",
-                reply_markup=main_menu_keyboard()
-            )
+            await message.reply_text(f"✅ **Channel Saved:** {ch_name}", reply_markup=main_menu_keyboard())
         except Exception:
             await message.reply_text("⚠️ Sahi format mein bhejein: `Channel Name, @username`")
+        del user_sessions[user_id]
+        return
+
+    if state == "WAITING_NEW_TOPIC":
+        try:
+            parts = message.text.split(",")
+            tp_name = parts[0].strip()
+            input_link = parts[1].strip()
+            chat_id, thread_id, _ = parse_post_link(input_link)
+            if not chat_id or not thread_id:
+                chat_id = parse_channel_input(parts[1].strip())
+                thread_id = int(parts[2].strip())
+
+            await topics_collection.update_one(
+                {"user_id": user_id, "chat_id": str(chat_id), "thread_id": thread_id},
+                {"$set": {"name": tp_name, "chat_id": str(chat_id), "thread_id": thread_id}},
+                upsert=True
+            )
+            await message.reply_text(f"✅ **Topic Saved:** {tp_name}", reply_markup=main_menu_keyboard())
+        except Exception:
+            await message.reply_text("⚠️ Sahi format mein bhejein: `Topic Name, Link`")
         del user_sessions[user_id]
         return
 
@@ -359,7 +430,7 @@ async def message_handler(client: Client, message: Message):
         session["temp_name"] = message.text.strip()
         session["state"] = "WAITING_STYLE_CHOICE"
         await message.reply_text(
-            f"✅ Button Name: <b>{session['temp_name']}</b>\n\n🎨 **Button ka Style Select Karein:**",
+            f"✅ Button Name: <b>{session['temp_name']}</b>\n\n🎨 **Style Select Karein:**",
             reply_markup=style_selection_keyboard()
         )
 
@@ -380,7 +451,7 @@ async def message_handler(client: Client, message: Message):
         session["state"] = "BUILDING"
         markup = build_preview_keyboard(session["grid"])
         sent = await message.reply_text(
-            f"✨ **Button Added Successfully!**\n\n<b>🔍 Current Live Preview:</b>\n\n{session['text']}",
+            f"✨ **Button Added!**\n\n<b>🔍 Current Preview:</b>\n\n{session['text']}",
             reply_markup=markup
         )
         session["preview_msg_id"] = sent.id
@@ -395,12 +466,9 @@ async def message_handler(client: Client, message: Message):
                 message_id=content_msg.id,
                 reply_markup=session["final_markup"]
             )
-            await message.reply_text(
-                f"🎉 <b>Post Successfully Published! ID:</b> <code>{sent.id}</code>",
-                reply_markup=main_menu_keyboard()
-            )
+            await message.reply_text(f"🎉 <b>Published! ID:</b> <code>{sent.id}</code>", reply_markup=main_menu_keyboard())
         except Exception as e:
-            await message.reply_text(f"❌ <b>Publishing Failed:</b> {str(e)}", reply_markup=main_menu_keyboard())
+            await message.reply_text(f"❌ <b>Failed:</b> {str(e)}", reply_markup=main_menu_keyboard())
         del user_sessions[user_id]
 
     elif state == "WAITING_TOPIC_INPUT":
@@ -424,12 +492,9 @@ async def message_handler(client: Client, message: Message):
                 reply_to_message_id=thread_id,
                 reply_markup=session["final_markup"]
             )
-            await message.reply_text(
-                f"🎉 <b>Topic Post Published! ID:</b> <code>{sent.id}</code>",
-                reply_markup=main_menu_keyboard()
-            )
+            await message.reply_text(f"🎉 <b>Topic Published! ID:</b> <code>{sent.id}</code>", reply_markup=main_menu_keyboard())
         except Exception as e:
-            await message.reply_text(f"❌ <b>Publishing Failed:</b> {str(e)}", reply_markup=main_menu_keyboard())
+            await message.reply_text(f"❌ <b>Failed:</b> {str(e)}", reply_markup=main_menu_keyboard())
         del user_sessions[user_id]
 
 
@@ -437,13 +502,48 @@ async def message_handler(client: Client, message: Message):
 
 @app.on_callback_query()
 async def callback_handler(client: Client, query: CallbackQuery):
+    data = query.data
+
+    # Delete Channel
+    if data.startswith("del_ch_"):
+        ch_db_id = data.replace("del_ch_", "")
+        await channels_collection.delete_one({"_id": ObjectId(ch_db_id)})
+        await query.answer("Channel Deleted!", show_alert=True)
+        await query.message.delete()
+        return
+
+    # Delete Topic
+    if data.startswith("del_tp_"):
+        tp_db_id = data.replace("del_tp_", "")
+        await topics_collection.delete_one({"_id": ObjectId(tp_db_id)})
+        await query.answer("Topic Deleted!", show_alert=True)
+        await query.message.delete()
+        return
+
+    if data == "add_new_ch_prompt":
+        user_id = query.from_user.id
+        user_sessions[user_id] = {"state": "WAITING_NEW_CHANNEL"}
+        await query.message.reply_text("📢 Naya Channel bhejein (`Name, @username` format mein):", reply_markup=cancel_only_keyboard())
+        await query.answer()
+        return
+
+    if data == "add_new_tp_prompt":
+        user_id = query.from_user.id
+        user_sessions[user_id] = {"state": "WAITING_NEW_TOPIC"}
+        await query.message.reply_text("💬 Naya Topic bhejein (`Name, Link` format mein):", reply_markup=cancel_only_keyboard())
+        await query.answer()
+        return
+
+    if data in ["ignore_ch", "ignore_tp"]:
+        await query.answer("Delete karne ke liye side wale ❌ Delete button par click karein.")
+        return
+
     user_id = query.from_user.id
     if user_id not in user_sessions:
-        await query.answer("Session Expired! Nayi post shuru karein.", show_alert=True)
+        await query.answer("Session Expired!", show_alert=True)
         return
 
     session = user_sessions[user_id]
-    data = query.data
 
     if data.startswith("add_") and data != "add_row":
         _, r, c = data.split("_")
@@ -472,17 +572,12 @@ async def callback_handler(client: Client, query: CallbackQuery):
     elif data.startswith("sel_ch_"):
         await query.answer()
         target_ch = data.replace("sel_ch_", "")
-        mode = session["mode"]
-        content_msg: Message = session["content_msg"]
+        content_msg = session["content_msg"]
         final_markup = session["final_markup"]
 
         if target_ch == "custom":
-            if mode == "NEW":
-                session["state"] = "WAITING_FINAL_CHANNEL"
-                await query.message.reply_text("📢 **Custom Channel Username ya ID Bhejein:**")
-            else:
-                session["state"] = "WAITING_TOPIC_INPUT"
-                await query.message.reply_text("💬 **Custom Topic Details Bhejein:** (Link ya `GroupID, TopicID`)")
+            session["state"] = "WAITING_FINAL_CHANNEL"
+            await query.message.reply_text("📢 Custom Channel Username ya ID Bhejein:")
         else:
             try:
                 sent = await client.copy_message(
@@ -491,13 +586,31 @@ async def callback_handler(client: Client, query: CallbackQuery):
                     message_id=content_msg.id,
                     reply_markup=final_markup
                 )
-                await query.message.reply_text(
-                    f"🎉 <b>Published Successfully! ID:</b> <code>{sent.id}</code>",
-                    reply_markup=main_menu_keyboard()
-                )
+                await query.message.reply_text(f"🎉 <b>Published! ID:</b> <code>{sent.id}</code>", reply_markup=main_menu_keyboard())
             except Exception as e:
                 await query.message.reply_text(f"❌ Error: {str(e)}", reply_markup=main_menu_keyboard())
             del user_sessions[user_id]
+
+    elif data.startswith("sel_tp_"):
+        await query.answer()
+        parts = data.split("_")
+        chat_id = parts[2]
+        thread_id = int(parts[3])
+        content_msg = session["content_msg"]
+        final_markup = session["final_markup"]
+
+        try:
+            sent = await client.copy_message(
+                chat_id=int(chat_id) if chat_id.startswith("-") or chat_id.isdigit() else chat_id,
+                from_chat_id=content_msg.chat.id,
+                message_id=content_msg.id,
+                reply_to_message_id=thread_id,
+                reply_markup=final_markup
+            )
+            await query.message.reply_text(f"🎉 <b>Topic Published! ID:</b> <code>{sent.id}</code>", reply_markup=main_menu_keyboard())
+        except Exception as e:
+            await query.message.reply_text(f"❌ Error: {str(e)}", reply_markup=main_menu_keyboard())
+        del user_sessions[user_id]
 
     elif data == "add_row":
         session["grid"].append([None])
@@ -531,12 +644,12 @@ async def callback_handler(client: Client, query: CallbackQuery):
         session["final_markup"] = final_markup
         mode = session["mode"]
 
-        if mode in ["NEW", "TOPIC_NEW"]:
+        if mode == "NEW":
             ch_keyboard = await get_saved_channels_keyboard(user_id)
-            await query.message.reply_text(
-                "📢 **Select Channel / Group for Publishing:**",
-                reply_markup=ch_keyboard
-            )
+            await query.message.reply_text("📢 **Channel Select Karein:**", reply_markup=ch_keyboard)
+        elif mode == "TOPIC_NEW":
+            tp_keyboard = await get_saved_topics_keyboard(user_id)
+            await query.message.reply_text("💬 **Topic Select Karein:**", reply_markup=tp_keyboard)
         elif mode in ["EDIT", "TOPIC_EDIT"]:
             try:
                 await client.edit_message_reply_markup(
@@ -544,10 +657,7 @@ async def callback_handler(client: Client, query: CallbackQuery):
                     message_id=session["target_msg_id"],
                     reply_markup=final_markup
                 )
-                await query.message.reply_text(
-                    "🎉 **Post / Topic Live Updated!**",
-                    reply_markup=main_menu_keyboard()
-                )
+                await query.message.reply_text("🎉 **Post / Topic Live Updated!**", reply_markup=main_menu_keyboard())
             except Exception as e:
                 await query.message.reply_text(f"❌ Error: {str(e)}", reply_markup=main_menu_keyboard())
             del user_sessions[user_id]
