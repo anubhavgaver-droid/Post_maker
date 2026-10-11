@@ -23,6 +23,7 @@ user_sessions = {}
 mongo_client = AsyncIOMotorClient(MONGO_URI)
 db = mongo_client["telegram_clone_bot"]
 channels_collection = db["saved_channels"]
+topics_collection = db["saved_topics"]
 
 
 # ----------------- CUSTOM REPLY KEYBOARDS -----------------
@@ -32,7 +33,8 @@ def main_menu_keyboard():
         [
             ["📝 New Post", "🔗 Edit Post"],
             ["💬 Topic Post", "✏️ Edit Topic"],
-            ["📢 Manage Channels"]
+            ["📢 Channels", "💬 Topics"],
+            ["🤖 Create Clone Bot"]
         ],
         resize_keyboard=True
     )
@@ -132,10 +134,7 @@ def style_selection_keyboard():
     ])
 
 
-async def get_saved_channels_keyboard(user_id: int):
-    """
-    User ke saved channels ki list ko inline keyboard buttons mein convert karta hai.
-    """
+async def get_saved_channels_keyboard(user_id: int, for_management: bool = False):
     cursor = channels_collection.find({"user_id": user_id})
     channels = await cursor.to_list(length=None)
     
@@ -143,10 +142,46 @@ async def get_saved_channels_keyboard(user_id: int):
     for ch in channels:
         ch_name = ch.get("name")
         ch_id = ch.get("chat_id")
-        keyboard.append([InlineKeyboardButton(f"📢 {ch_name}", callback_data=f"sel_ch_{ch_id}")])
+        db_id = str(ch.get("_id"))
+        if for_management:
+            keyboard.append([
+                InlineKeyboardButton(f"📢 {ch_name}", callback_data=f"ignore_ch"),
+                InlineKeyboardButton("❌ Delete", callback_data=f"del_ch_{db_id}")
+            ])
+        else:
+            keyboard.append([InlineKeyboardButton(f"📢 {ch_name}", callback_data=f"sel_ch_{ch_id}")])
     
-    # Custom / New channel option
-    keyboard.append([InlineKeyboardButton("➕ Add New / Custom Channel", callback_data="sel_ch_custom")])
+    if not for_management:
+        keyboard.append([InlineKeyboardButton("➕ Add New / Custom Channel", callback_data="sel_ch_custom")])
+    else:
+        keyboard.append([InlineKeyboardButton("➕ Add New Channel", callback_data="add_new_ch_prompt")])
+        
+    return InlineKeyboardMarkup(keyboard)
+
+
+async def get_saved_topics_keyboard(user_id: int, for_management: bool = False):
+    cursor = topics_collection.find({"user_id": user_id})
+    topics = await cursor.to_list(length=None)
+    
+    keyboard = []
+    for tp in topics:
+        tp_name = tp.get("name")
+        chat_id = tp.get("chat_id")
+        thread_id = tp.get("thread_id")
+        db_id = str(tp.get("_id"))
+        if for_management:
+            keyboard.append([
+                InlineKeyboardButton(f"💬 {tp_name}", callback_data=f"ignore_tp"),
+                InlineKeyboardButton("❌ Delete", callback_data=f"del_tp_{db_id}")
+            ])
+        else:
+            keyboard.append([InlineKeyboardButton(f"💬 {tp_name}", callback_data=f"sel_tp_{chat_id}_{thread_id}")])
+            
+    if not for_management:
+        keyboard.append([InlineKeyboardButton("➕ Add New / Custom Topic", callback_data="sel_tp_custom")])
+    else:
+        keyboard.append([InlineKeyboardButton("➕ Add New Topic", callback_data="add_new_tp_prompt")])
+        
     return InlineKeyboardMarkup(keyboard)
 
 
@@ -154,8 +189,6 @@ async def get_saved_channels_keyboard(user_id: int):
 
 @app.on_message(filters.command("start") & filters.private)
 async def start_cmd(client: Client, message: Message):
-    if message.from_user.id not in ADMIN_IDS:
-        return
     await message.reply_text(
         "<b>👋 Welcome to Interactive Post Builder Bot!</b>\n\n"
         "Neeche diye gaye buttons se apna action select karein:",
@@ -256,26 +289,60 @@ async def edittopic_cmd(client: Client, message: Message):
     )
 
 
-# --- MANAGE CHANNELS ---
-@app.on_message(filters.regex("📢 Manage Channels") & filters.private)
-async def manage_channels_cmd(client: Client, message: Message):
+# --- MANAGE CHANNELS SEPARATE ---
+@app.on_message(filters.regex("📢 Channels") & filters.private)
+async def manage_channels_menu(client: Client, message: Message):
     user_id = message.from_user.id
     if user_id not in ADMIN_IDS:
         return
     
-    user_sessions[user_id] = {"state": "WAITING_NEW_CHANNEL_DETAILS"}
+    keyboard = await get_saved_channels_keyboard(user_id, for_management=True)
     await message.reply_text(
-        "📢 **Add New Channel / Group:**\n\n"
-        "Apne channel ka naam aur username/ID is format mein bhejein:\n"
-        "`Channel Name, @username_or_id`\n\n"
-        "Example: `My Main Channel, @my_channel`",
+        "📢 **Manage Saved Channels:**\n\nNeeche aapke saved channels ki list hai. Delete button se hata sakte hain:",
+        reply_markup=keyboard
+    )
+
+
+# --- MANAGE TOPICS SEPARATE ---
+@app.on_message(filters.regex("💬 Topics") & filters.private)
+async def manage_topics_menu(client: Client, message: Message):
+    user_id = message.from_user.id
+    if user_id not in ADMIN_IDS:
+        return
+    
+    keyboard = await get_saved_topics_keyboard(user_id, for_management=True)
+    await message.reply_text(
+        "💬 **Manage Saved Group Topics:**\n\nNeeche aapke saved topics ki list hai. Delete button se hata sakte hain:",
+        reply_markup=keyboard
+    )
+
+
+# --- CLONE BOT INITIATION ---
+@app.on_message((filters.regex("🤖 Create Clone Bot") | filters.command("clone")) & filters.private)
+async def clone_init_cmd(client: Client, message: Message):
+    user_id = message.from_user.id
+    
+    existing = await channels_collection.database["clones"].find_one({"user_id": user_id, "status": "approved"})
+    if existing:
+        await message.reply_text(
+            f"⚠️ **Aapka Clone Bot Already Active Hai!**\n\n🤖 Username: @{existing.get('bot_username')}",
+            reply_markup=main_menu_keyboard()
+        )
+        return
+
+    user_sessions[user_id] = {"state": "WAITING_CLONE_TOKEN"}
+    await message.reply_text(
+        "🤖 **Create Your Own Clone Bot:**\n\n"
+        "1. @BotFather par jaayein aur naya bot banayein.\n"
+        "2. Wahan se mila hua **Bot Token** copy karein.\n"
+        "3. Us Bot Token ko yahan bhejein:",
         reply_markup=cancel_only_keyboard()
     )
 
 
 # ----------------- MAIN MESSAGE ROUTER -----------------
 
-@app.on_message(filters.private & ~filters.command(["start", "cancel", "newpost", "editpost", "topicpost", "edittopic"]) & ~filters.regex("^(📝 New Post|🔗 Edit Post|💬 Topic Post|✏️ Edit Topic|📢 Manage Channels|❌ Cancel Process)$"))
+@app.on_message(filters.private & ~filters.command(["start", "cancel", "newpost", "editpost", "topicpost", "edittopic", "clone"]) & ~filters.regex("^(📝 New Post|🔗 Edit Post|💬 Topic Post|✏️ Edit Topic|📢 Channels|💬 Topics|🤖 Create Clone Bot|❌ Cancel Process)$"))
 async def message_handler(client: Client, message: Message):
     user_id = message.from_user.id
     if user_id not in user_sessions:
@@ -284,8 +351,8 @@ async def message_handler(client: Client, message: Message):
     session = user_sessions[user_id]
     state = session.get("state")
 
-    # Save New Channel Handler
-    if state == "WAITING_NEW_CHANNEL_DETAILS":
+    # Add New Channel Details Handler
+    if state == "WAITING_NEW_CHANNEL":
         try:
             parts = message.text.split(",")
             ch_name = parts[0].strip()
@@ -297,12 +364,72 @@ async def message_handler(client: Client, message: Message):
                 upsert=True
             )
             await message.reply_text(
-                f"✅ **Channel Successfully Saved!**\n\n📢 Name: {ch_name}\n🆔 ID/Username: <code>{ch_input}</code>",
+                f"✅ **Channel Saved Successfully!**\n📢 Name: {ch_name}",
                 reply_markup=main_menu_keyboard()
             )
         except Exception:
             await message.reply_text("⚠️ Sahi format mein bhejein: `Channel Name, @username`")
-        
+        del user_sessions[user_id]
+        return
+
+    # Add New Topic Details Handler
+    if state == "WAITING_NEW_TOPIC":
+        try:
+            parts = message.text.split(",")
+            tp_name = parts[0].strip()
+            input_link_or_ids = parts[1].strip()
+            
+            chat_id, thread_id, _ = parse_post_link(input_link_or_ids)
+            if not chat_id or not thread_id:
+                subparts = input_link_or_ids.split("-") # or comma
+                chat_id = parse_channel_input(parts[1].strip())
+                thread_id = int(parts[2].strip())
+
+            await topics_collection.update_one(
+                {"user_id": user_id, "chat_id": str(chat_id), "thread_id": thread_id},
+                {"$set": {"name": tp_name, "chat_id": str(chat_id), "thread_id": thread_id}},
+                upsert=True
+            )
+            await message.reply_text(
+                f"✅ **Topic Saved Successfully!**\n💬 Name: {tp_name}",
+                reply_markup=main_menu_keyboard()
+            )
+        except Exception:
+            await message.reply_text("⚠️ Sahi format mein bhejein: `Topic Name, Link` ya `Topic Name, GroupID, ThreadID`")
+        del user_sessions[user_id]
+        return
+
+    # Cloned Bot Token Submission
+    if state == "WAITING_CLONE_TOKEN":
+        token = message.text.strip()
+        try:
+            test_client = Client(f"test_{user_id}", api_id=API_ID, api_hash=API_HASH, bot_token=token)
+            await test_client.start()
+            me = await test_client.get_me()
+            await test_client.stop()
+
+            await channels_collection.database["pending_clones"].update_one(
+                {"user_id": user_id},
+                {"$set": {"bot_token": token, "bot_username": me.username, "bot_name": me.first_name, "status": "pending"}},
+                upsert=True
+            )
+
+            log_text = (
+                f"🔔 **New Clone Bot Request Pending!**\n\n"
+                f"👤 **User:** {message.from_user.mention} (<code>{user_id}</code>)\n"
+                f"🤖 **Bot Name:** {me.first_name}\n"
+                f"🔗 **Username:** @{me.username}"
+            )
+            approval_markup = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("✅ Approve", callback_data=f"approve_clone_{user_id}"),
+                    InlineKeyboardButton("❌ Reject", callback_data=f"reject_clone_{user_id}")
+                ]
+            ])
+            await client.send_message(LOG_CHANNEL_ID, log_text, reply_markup=approval_markup)
+            await message.reply_text("⏳ **Token submitted!** Admin approval ke baad activate ho jayega.", reply_markup=main_menu_keyboard())
+        except Exception as e:
+            await message.reply_text(f"❌ **Invalid Token!** Error: {str(e)}")
         del user_sessions[user_id]
         return
 
@@ -322,7 +449,7 @@ async def message_handler(client: Client, message: Message):
     elif state == "WAITING_POST_LINK":
         chat_id, thread_id, msg_id = parse_post_link(message.text.strip())
         if not chat_id or not msg_id:
-            await message.reply_text("⚠️ Invalid Telegram Post Link! Sahi link bhejein.")
+            await message.reply_text("⚠️ Invalid Telegram Post Link!")
             return
 
         try:
@@ -369,20 +496,14 @@ async def message_handler(client: Client, message: Message):
     elif state == "WAITING_BTN_NAME":
         session["temp_name"] = message.text.strip()
         session["state"] = "WAITING_STYLE_CHOICE"
-        
         await message.reply_text(
-            f"✅ Button Name: <b>{session['temp_name']}</b>\n\n"
-            "🎨 **Button ka Style Select Karein:**",
+            f"✅ Button Name: <b>{session['temp_name']}</b>\n\n🎨 **Style Select Karein:**",
             reply_markup=style_selection_keyboard()
         )
 
     # 4. Button URL
     elif state == "WAITING_BTN_URL":
         url = message.text.strip()
-        if not (url.startswith("http://") or url.startswith("https://") or url.startswith("t.me/")):
-            await message.reply_text("⚠️ Sahi URL link bhejein!")
-            return
-
         r, c = session["target_pos"]
         btn_name = session["temp_name"]
         btn_style = session.get("selected_style", None)
@@ -394,12 +515,12 @@ async def message_handler(client: Client, message: Message):
         session["state"] = "BUILDING"
         markup = build_preview_keyboard(session["grid"])
         sent = await message.reply_text(
-            f"✨ **Button Added Successfully!**\n\n<b>🔍 Current Live Preview:</b>\n\n{session['text']}",
+            f"✨ **Button Added!**\n\n<b>🔍 Current Preview:</b>\n\n{session['text']}",
             reply_markup=markup
         )
         session["preview_msg_id"] = sent.id
 
-    # 5. Final Publishing (Custom Channel Input selected)
+    # 5. Final Custom Channel Input
     elif state == "WAITING_FINAL_CHANNEL":
         channel_input = parse_channel_input(message.text.strip())
         try:
@@ -410,34 +531,15 @@ async def message_handler(client: Client, message: Message):
                 message_id=content_msg.id,
                 reply_markup=session["final_markup"]
             )
-            await message.reply_text(
-                f"🎉 <b>Post Successfully Published!</b>\n\n"
-                f"📍 <b>Target:</b> <code>{channel_input}</code>\n"
-                f"🆔 <b>Message ID:</b> <code>{(sent.id if sent else 'Sent')}</code>",
-                reply_markup=main_menu_keyboard()
-            )
+            await message.reply_text(f"🎉 <b>Published Successfully! ID:</b> <code>{sent.id}</code>", reply_markup=main_menu_keyboard())
         except Exception as e:
-            await message.reply_text(
-                f"❌ <b>Publishing Failed:</b> <code>{str(e)}</code>",
-                reply_markup=main_menu_keyboard()
-            )
-
+            await message.reply_text(f"❌ <b>Failed:</b> {str(e)}", reply_markup=main_menu_keyboard())
         del user_sessions[user_id]
 
-    # 6. Final Publishing (Topic Group Custom Input)
+    # 6. Final Custom Topic Input
     elif state == "WAITING_TOPIC_INPUT":
         input_text = message.text.strip()
         chat_id, thread_id, _ = parse_post_link(input_text)
-
-        if not chat_id or not thread_id:
-            try:
-                parts = input_text.split(",")
-                chat_id = parse_channel_input(parts[0].strip())
-                thread_id = int(parts[1].strip())
-            except Exception:
-                await message.reply_text("⚠️ Invalid Topic Input! Topic Link ya `GroupID, TopicID` format mein bhejein.")
-                return
-
         try:
             content_msg: Message = session["content_msg"]
             sent = await client.copy_message(
@@ -447,19 +549,9 @@ async def message_handler(client: Client, message: Message):
                 reply_to_message_id=thread_id,
                 reply_markup=session["final_markup"]
             )
-            await message.reply_text(
-                f"🎉 <b>Topic Post Successfully Published!</b>\n\n"
-                f"📍 <b>Group:</b> <code>{chat_id}</code>\n"
-                f"💬 <b>Topic ID:</b> <code>{thread_id}</code>\n"
-                f"🆔 <b>Message ID:</b> <code>{(sent.id if sent else 'Sent')}</code>",
-                reply_markup=main_menu_keyboard()
-            )
+            await message.reply_text(f"🎉 <b>Topic Published Successfully! ID:</b> <code>{sent.id}</code>", reply_markup=main_menu_keyboard())
         except Exception as e:
-            await message.reply_text(
-                f"❌ <b>Topic Publishing Failed:</b> <code>{str(e)}</code>",
-                reply_markup=main_menu_keyboard()
-            )
-
+            await message.reply_text(f"❌ <b>Failed:</b> {str(e)}", reply_markup=main_menu_keyboard())
         del user_sessions[user_id]
 
 
@@ -467,56 +559,64 @@ async def message_handler(client: Client, message: Message):
 
 @app.on_callback_query()
 async def callback_handler(client: Client, query: CallbackQuery):
+    data = query.data
+
+    # Channel Delete Handler
+    if data.startswith("del_ch_"):
+        from bson import ObjectId
+        ch_db_id = data.replace("del_ch_", "")
+        await channels_collection.delete_one({"_id": ObjectId(ch_db_id)})
+        await query.answer("Channel Deleted!", show_alert=True)
+        keyboard = await get_saved_channels_keyboard(query.from_user.id, for_management=True)
+        await query.message.edit_reply_markup(reply_markup=keyboard)
+        return
+
+    # Topic Delete Handler
+    if data.startswith("del_tp_"):
+        from bson import ObjectId
+        tp_db_id = data.replace("del_tp_", "")
+        await topics_collection.delete_one({"_id": ObjectId(tp_db_id)})
+        await query.answer("Topic Deleted!", show_alert=True)
+        keyboard = await get_saved_topics_keyboard(query.from_user.id, for_management=True)
+        await query.message.edit_reply_markup(reply_markup=keyboard)
+        return
+
+    if data == "add_new_ch_prompt":
+        user_id = query.from_user.id
+        user_sessions[user_id] = {"state": "WAITING_NEW_CHANNEL"}
+        await query.message.reply_text("📢 Naya Channel bhejein (`Name, @username` format mein):", reply_markup=cancel_only_keyboard())
+        await query.answer()
+        return
+
+    if data == "add_new_tp_prompt":
+        user_id = query.from_user.id
+        user_sessions[user_id] = {"state": "WAITING_NEW_TOPIC"}
+        await query.message.reply_text("💬 Naya Topic bhejein (`Name, Link` format mein):", reply_markup=cancel_only_keyboard())
+        await query.answer()
+        return
+
+    if data == "ignore_ch" or data == "ignore_tp":
+        await query.answer("Yeh sirf naam hai, delete karne ke liye side wale ❌ Delete button par click karein.")
+        return
+
+    # Session check
     user_id = query.from_user.id
     if user_id not in user_sessions:
-        # Check if it's finish post selection
-        if query.data.startswith("sel_ch_"):
-            await query.answer("Session Expired or Invalid!", show_alert=True)
-            return
         await query.answer("Session Expired!", show_alert=True)
         return
 
     session = user_sessions[user_id]
-    data = query.data
 
-    if data.startswith("add_") and data != "add_row":
-        _, r, c = data.split("_")
-        session["target_pos"] = (int(r), int(c))
-        session["state"] = "WAITING_BTN_NAME"
-        await query.answer()
-        await query.message.reply_text(f"➕ Button Name (Row {int(r)+1}, Col {int(c)+1}) bhejein:")
-
-    elif data.startswith("style_"):
-        await query.answer()
-
-        if data == "style_primary":
-            session["selected_style"] = enums.ButtonStyle.PRIMARY
-        elif data == "style_success":
-            session["selected_style"] = getattr(enums.ButtonStyle, "SUCCESS", getattr(enums.ButtonStyle, "POSITIVE", None))
-        elif data == "style_danger":
-            session["selected_style"] = enums.ButtonStyle.DANGER
-        else:
-            session["selected_style"] = None
-
-        session["state"] = "WAITING_BTN_URL"
-        await query.message.edit_text("✅ Style selected!\n\n🔗 **Ab URL Link bhejein:**")
-
-    elif data.startswith("sel_ch_"):
+    if data.startswith("sel_ch_"):
         await query.answer()
         target_ch = data.replace("sel_ch_", "")
-        mode = session["mode"]
-        content_msg: Message = session["content_msg"]
+        content_msg = session["content_msg"]
         final_markup = session["final_markup"]
 
         if target_ch == "custom":
-            if mode == "NEW":
-                session["state"] = "WAITING_FINAL_CHANNEL"
-                await query.message.reply_text("📢 <b>Custom Channel Username ya ID Bhejein:</b>\n(e.g. <code>@mychannel</code> ya <code>-100123456789</code>)")
-            else:
-                session["state"] = "WAITING_TOPIC_INPUT"
-                await query.message.reply_text("💬 <b>Custom Topic Details Bhejein:</b> (Link ya `GroupID, TopicID`)")
+            session["state"] = "WAITING_FINAL_CHANNEL"
+            await query.message.reply_text("📢 Custom Channel ID ya Username bhejein:")
         else:
-            # Publish directly to selected saved channel
             try:
                 sent = await client.copy_message(
                     chat_id=int(target_ch) if target_ch.startswith("-") or target_ch.isdigit() else target_ch,
@@ -524,29 +624,31 @@ async def callback_handler(client: Client, query: CallbackQuery):
                     message_id=content_msg.id,
                     reply_markup=final_markup
                 )
-                await query.message.reply_text(
-                    f"🎉 <b>Post Successfully Published!</b>\n\n"
-                    f"📍 <b>Target Channel ID:</b> <code>{target_ch}</code>\n"
-                    f"🆔 <b>Message ID:</b> <code>{(sent.id if sent else 'Sent')}</code>",
-                    reply_markup=main_menu_keyboard()
-                )
+                await query.message.reply_text(f"🎉 <b>Published! ID:</b> <code>{sent.id}</code>", reply_markup=main_menu_keyboard())
             except Exception as e:
-                await query.message.reply_text(
-                    f"❌ <b>Publishing Failed:</b> <code>{str(e)}</code>",
-                    reply_markup=main_menu_keyboard()
-                )
+                await query.message.reply_text(f"❌ Error: {str(e)}", reply_markup=main_menu_keyboard())
             del user_sessions[user_id]
 
-    elif data == "add_row":
-        session["grid"].append([None])
-        await query.answer("New Row added!")
-        
-        markup = build_preview_keyboard(session["grid"])
-        sent = await query.message.reply_text(
-            f"➕ **New Row Added!**\n\n<b>🔍 Current Live Preview:</b>\n\n{session['text']}",
-            reply_markup=markup
-        )
-        session["preview_msg_id"] = sent.id
+    elif data.startswith("sel_tp_"):
+        await query.answer()
+        parts = data.split("_")
+        chat_id = parts[2]
+        thread_id = int(parts[3])
+        content_msg = session["content_msg"]
+        final_markup = session["final_markup"]
+
+        try:
+            sent = await client.copy_message(
+                chat_id=int(chat_id) if chat_id.startswith("-") or chat_id.isdigit() else chat_id,
+                from_chat_id=content_msg.chat.id,
+                message_id=content_msg.id,
+                reply_to_message_id=thread_id,
+                reply_markup=final_markup
+            )
+            await query.message.reply_text(f"🎉 <b>Topic Published! ID:</b> <code>{sent.id}</code>", reply_markup=main_menu_keyboard())
+        except Exception as e:
+            await query.message.reply_text(f"❌ Error: {str(e)}", reply_markup=main_menu_keyboard())
+        del user_sessions[user_id]
 
     elif data == "finish_post":
         await query.answer()
@@ -564,37 +666,15 @@ async def callback_handler(client: Client, query: CallbackQuery):
                         row_btns.append(InlineKeyboardButton(b_name, url=b_url))
                 final_grid.append(row_btns)
 
-        final_markup = InlineKeyboardMarkup(final_grid) if final_grid else None
-        session["final_markup"] = final_markup
-
+        session["final_markup"] = InlineKeyboardMarkup(final_grid) if final_grid else None
         mode = session["mode"]
 
-        if mode in ["NEW", "TOPIC_NEW"]:
-            # Saved channels list dikhayein, agar koi saved na ho toh direct custom option select ho jayega
-            ch_keyboard = await get_saved_channels_keyboard(user_id)
-            await query.message.reply_text(
-                "📢 **Select Channel / Group for Publishing:**\n\n"
-                "Neeche diye gaye connected channels mein se select karein, ya naya add karne ke liye 'Add New' dabayein:",
-                reply_markup=ch_keyboard
-            )
-
-        elif mode in ["EDIT", "TOPIC_EDIT"]:
-            try:
-                await client.edit_message_reply_markup(
-                    chat_id=session["target_chat"],
-                    message_id=session["target_msg_id"],
-                    reply_markup=final_markup
-                )
-                await query.message.reply_text(
-                    "🎉 **Post / Topic Post Live Refreshed & Updated!**",
-                    reply_markup=main_menu_keyboard()
-                )
-            except Exception as e:
-                await query.message.reply_text(
-                    f"❌ Failed to edit post: {str(e)}",
-                    reply_markup=main_menu_keyboard()
-                )
-            del user_sessions[user_id]
+        if mode == "NEW":
+            ch_keyboard = await get_saved_channels_keyboard(user_id, for_management=False)
+            await query.message.reply_text("📢 **Channel Select Karein:**", reply_markup=ch_keyboard)
+        elif mode == "TOPIC_NEW":
+            tp_keyboard = await get_saved_topics_keyboard(user_id, for_management=False)
+            await query.message.reply_text("💬 **Topic Select Karein:**", reply_markup=tp_keyboard)
 
 
 async def main():
