@@ -9,14 +9,20 @@ from pyrogram.types import (
     ReplyKeyboardMarkup,
     CallbackQuery
 )
+from motor.motor_asyncio import AsyncIOMotorClient
 
-from config import API_ID, API_HASH, BOT_TOKEN, ADMIN_IDS
+from config import API_ID, API_HASH, BOT_TOKEN, ADMIN_IDS, MONGO_URI, LOG_CHANNEL_ID
 from server import start_web_server, self_ping_loop
 
 app = Client("interactive_post_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
 # Global session dictionary
 user_sessions = {}
+
+# MongoDB Setup
+mongo_client = AsyncIOMotorClient(MONGO_URI)
+db = mongo_client["telegram_clone_bot"]
+channels_collection = db["saved_channels"]
 
 
 # ----------------- CUSTOM REPLY KEYBOARDS -----------------
@@ -25,7 +31,8 @@ def main_menu_keyboard():
     return ReplyKeyboardMarkup(
         [
             ["📝 New Post", "🔗 Edit Post"],
-            ["💬 Topic Post", "✏️ Edit Topic"]
+            ["💬 Topic Post", "✏️ Edit Topic"],
+            ["📢 Manage Channels"]
         ],
         resize_keyboard=True
     )
@@ -123,6 +130,24 @@ def style_selection_keyboard():
             InlineKeyboardButton("⚪ Normal", callback_data="style_normal"),
         ]
     ])
+
+
+async def get_saved_channels_keyboard(user_id: int):
+    """
+    User ke saved channels ki list ko inline keyboard buttons mein convert karta hai.
+    """
+    cursor = channels_collection.find({"user_id": user_id})
+    channels = await cursor.to_list(length=None)
+    
+    keyboard = []
+    for ch in channels:
+        ch_name = ch.get("name")
+        ch_id = ch.get("chat_id")
+        keyboard.append([InlineKeyboardButton(f"📢 {ch_name}", callback_data=f"sel_ch_{ch_id}")])
+    
+    # Custom / New channel option
+    keyboard.append([InlineKeyboardButton("➕ Add New / Custom Channel", callback_data="sel_ch_custom")])
+    return InlineKeyboardMarkup(keyboard)
 
 
 # ----------------- COMMAND & MENU HANDLERS -----------------
@@ -231,9 +256,26 @@ async def edittopic_cmd(client: Client, message: Message):
     )
 
 
+# --- MANAGE CHANNELS ---
+@app.on_message(filters.regex("📢 Manage Channels") & filters.private)
+async def manage_channels_cmd(client: Client, message: Message):
+    user_id = message.from_user.id
+    if user_id not in ADMIN_IDS:
+        return
+    
+    user_sessions[user_id] = {"state": "WAITING_NEW_CHANNEL_DETAILS"}
+    await message.reply_text(
+        "📢 **Add New Channel / Group:**\n\n"
+        "Apne channel ka naam aur username/ID is format mein bhejein:\n"
+        "`Channel Name, @username_or_id`\n\n"
+        "Example: `My Main Channel, @my_channel`",
+        reply_markup=cancel_only_keyboard()
+    )
+
+
 # ----------------- MAIN MESSAGE ROUTER -----------------
 
-@app.on_message(filters.private & ~filters.command(["start", "cancel", "newpost", "editpost", "topicpost", "edittopic"]) & ~filters.regex("^(📝 New Post|🔗 Edit Post|💬 Topic Post|✏️ Edit Topic|❌ Cancel Process)$"))
+@app.on_message(filters.private & ~filters.command(["start", "cancel", "newpost", "editpost", "topicpost", "edittopic"]) & ~filters.regex("^(📝 New Post|🔗 Edit Post|💬 Topic Post|✏️ Edit Topic|📢 Manage Channels|❌ Cancel Process)$"))
 async def message_handler(client: Client, message: Message):
     user_id = message.from_user.id
     if user_id not in user_sessions:
@@ -241,6 +283,28 @@ async def message_handler(client: Client, message: Message):
 
     session = user_sessions[user_id]
     state = session.get("state")
+
+    # Save New Channel Handler
+    if state == "WAITING_NEW_CHANNEL_DETAILS":
+        try:
+            parts = message.text.split(",")
+            ch_name = parts[0].strip()
+            ch_input = parse_channel_input(parts[1].strip())
+
+            await channels_collection.update_one(
+                {"user_id": user_id, "chat_id": str(ch_input)},
+                {"$set": {"name": ch_name, "chat_id": str(ch_input)}},
+                upsert=True
+            )
+            await message.reply_text(
+                f"✅ **Channel Successfully Saved!**\n\n📢 Name: {ch_name}\n🆔 ID/Username: <code>{ch_input}</code>",
+                reply_markup=main_menu_keyboard()
+            )
+        except Exception:
+            await message.reply_text("⚠️ Sahi format mein bhejein: `Channel Name, @username`")
+        
+        del user_sessions[user_id]
+        return
 
     # 1. Post Content Title
     if state == "WAITING_TITLE":
@@ -312,7 +376,7 @@ async def message_handler(client: Client, message: Message):
             reply_markup=style_selection_keyboard()
         )
 
-    # 4. Button URL (Ab yahan naya preview message neeche bhejega)
+    # 4. Button URL
     elif state == "WAITING_BTN_URL":
         url = message.text.strip()
         if not (url.startswith("http://") or url.startswith("https://") or url.startswith("t.me/")):
@@ -328,8 +392,6 @@ async def message_handler(client: Client, message: Message):
             session["grid"][r].append(None)
 
         session["state"] = "BUILDING"
-        
-        # Naya preview message chat ke bilkul neeche send karein
         markup = build_preview_keyboard(session["grid"])
         sent = await message.reply_text(
             f"✨ **Button Added Successfully!**\n\n<b>🔍 Current Live Preview:</b>\n\n{session['text']}",
@@ -337,7 +399,7 @@ async def message_handler(client: Client, message: Message):
         )
         session["preview_msg_id"] = sent.id
 
-    # 5. Final Publishing (Channel)
+    # 5. Final Publishing (Custom Channel Input selected)
     elif state == "WAITING_FINAL_CHANNEL":
         channel_input = parse_channel_input(message.text.strip())
         try:
@@ -362,7 +424,7 @@ async def message_handler(client: Client, message: Message):
 
         del user_sessions[user_id]
 
-    # 6. Final Publishing (Topic Group)
+    # 6. Final Publishing (Topic Group Custom Input)
     elif state == "WAITING_TOPIC_INPUT":
         input_text = message.text.strip()
         chat_id, thread_id, _ = parse_post_link(input_text)
@@ -407,6 +469,10 @@ async def message_handler(client: Client, message: Message):
 async def callback_handler(client: Client, query: CallbackQuery):
     user_id = query.from_user.id
     if user_id not in user_sessions:
+        # Check if it's finish post selection
+        if query.data.startswith("sel_ch_"):
+            await query.answer("Session Expired or Invalid!", show_alert=True)
+            return
         await query.answer("Session Expired!", show_alert=True)
         return
 
@@ -435,11 +501,46 @@ async def callback_handler(client: Client, query: CallbackQuery):
         session["state"] = "WAITING_BTN_URL"
         await query.message.edit_text("✅ Style selected!\n\n🔗 **Ab URL Link bhejein:**")
 
+    elif data.startswith("sel_ch_"):
+        await query.answer()
+        target_ch = data.replace("sel_ch_", "")
+        mode = session["mode"]
+        content_msg: Message = session["content_msg"]
+        final_markup = session["final_markup"]
+
+        if target_ch == "custom":
+            if mode == "NEW":
+                session["state"] = "WAITING_FINAL_CHANNEL"
+                await query.message.reply_text("📢 <b>Custom Channel Username ya ID Bhejein:</b>\n(e.g. <code>@mychannel</code> ya <code>-100123456789</code>)")
+            else:
+                session["state"] = "WAITING_TOPIC_INPUT"
+                await query.message.reply_text("💬 <b>Custom Topic Details Bhejein:</b> (Link ya `GroupID, TopicID`)")
+        else:
+            # Publish directly to selected saved channel
+            try:
+                sent = await client.copy_message(
+                    chat_id=int(target_ch) if target_ch.startswith("-") or target_ch.isdigit() else target_ch,
+                    from_chat_id=content_msg.chat.id,
+                    message_id=content_msg.id,
+                    reply_markup=final_markup
+                )
+                await query.message.reply_text(
+                    f"🎉 <b>Post Successfully Published!</b>\n\n"
+                    f"📍 <b>Target Channel ID:</b> <code>{target_ch}</code>\n"
+                    f"🆔 <b>Message ID:</b> <code>{(sent.id if sent else 'Sent')}</code>",
+                    reply_markup=main_menu_keyboard()
+                )
+            except Exception as e:
+                await query.message.reply_text(
+                    f"❌ <b>Publishing Failed:</b> <code>{str(e)}</code>",
+                    reply_markup=main_menu_keyboard()
+                )
+            del user_sessions[user_id]
+
     elif data == "add_row":
         session["grid"].append([None])
         await query.answer("New Row added!")
         
-        # Nayi row add hone par bhi naya preview message neeche bhej dega
         markup = build_preview_keyboard(session["grid"])
         sent = await query.message.reply_text(
             f"➕ **New Row Added!**\n\n<b>🔍 Current Live Preview:</b>\n\n{session['text']}",
@@ -468,16 +569,13 @@ async def callback_handler(client: Client, query: CallbackQuery):
 
         mode = session["mode"]
 
-        if mode == "NEW":
-            session["state"] = "WAITING_FINAL_CHANNEL"
-            await query.message.reply_text("📢 <b>Channel Username ya ID Bhejein:</b>\n(e.g. <code>@mychannel</code> ya <code>-100123456789</code>)")
-
-        elif mode == "TOPIC_NEW":
-            session["state"] = "WAITING_TOPIC_INPUT"
+        if mode in ["NEW", "TOPIC_NEW"]:
+            # Saved channels list dikhayein, agar koi saved na ho toh direct custom option select ho jayega
+            ch_keyboard = await get_saved_channels_keyboard(user_id)
             await query.message.reply_text(
-                "💬 <b>Topic Details Bhejein:</b>\n\n"
-                "• Topic Message ka Direct Link (e.g. <code>https://t.me/c/123456/45/678</code>)\n"
-                "• Ya Group ID, Topic ID (e.g. <code>-100123456789, 45</code>)"
+                "📢 **Select Channel / Group for Publishing:**\n\n"
+                "Neeche diye gaye connected channels mein se select karein, ya naya add karne ke liye 'Add New' dabayein:",
+                reply_markup=ch_keyboard
             )
 
         elif mode in ["EDIT", "TOPIC_EDIT"]:
@@ -502,7 +600,7 @@ async def callback_handler(client: Client, query: CallbackQuery):
 async def main():
     await start_web_server()
     asyncio.create_task(self_ping_loop())
-    print("Bot Starting...")
+    print("Main Bot Starting...")
     await app.start()
     await idle()
 
