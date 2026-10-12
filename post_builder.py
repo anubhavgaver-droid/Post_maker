@@ -20,7 +20,7 @@ app = Client("interactive_post_bot", api_id=API_ID, api_hash=API_HASH, bot_token
 # Global session dictionary
 user_sessions = {}
 
-# MongoDB Setup
+# MongoDB Setup (Separate Collections for Channels and Topics)
 mongo_client = AsyncIOMotorClient(MONGO_URI)
 db = mongo_client["interactive_post_bot_db"]
 channels_collection = db["saved_channels"]
@@ -106,18 +106,12 @@ def build_preview_keyboard(grid_data):
             if item is None:
                 row_buttons.append(InlineKeyboardButton("➕", callback_data=f"add_{r_idx}_{c_idx}"))
             else:
-                btn_name = item[0]
-                btn_url = item[1]
+                btn_name, btn_url = item[0], item[1]
                 btn_style = item[2] if len(item) > 2 else None
-                btn_emoji_id = item[3] if len(item) > 3 else None
-                
-                kwargs = {"text": btn_name, "url": btn_url}
                 if btn_style:
-                    kwargs["style"] = btn_style
-                if btn_emoji_id:
-                    kwargs["icon_custom_emoji_id"] = btn_emoji_id
-                    
-                row_buttons.append(InlineKeyboardButton(**kwargs))
+                    row_buttons.append(InlineKeyboardButton(btn_name, url=btn_url, style=btn_style))
+                else:
+                    row_buttons.append(InlineKeyboardButton(btn_name, url=btn_url))
         keyboard.append(row_buttons)
 
     keyboard.append([
@@ -296,7 +290,7 @@ async def manage_channels_menu(client: Client, message: Message):
     keyboard.append([InlineKeyboardButton("➕ Add New Channel", callback_data="add_new_ch_prompt")])
     
     await message.reply_text(
-        "📢 **Manage Saved Channels:**",
+        "📢 **Manage Saved Channels:**\n\nNeeche aapke saved channels ki list hai:",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
@@ -322,7 +316,7 @@ async def manage_topics_menu(client: Client, message: Message):
     keyboard.append([InlineKeyboardButton("➕ Add New Topic", callback_data="add_new_tp_prompt")])
     
     await message.reply_text(
-        "💬 **Manage Saved Group Topics:**",
+        "💬 **Manage Saved Group Topics:**\n\nNeeche aapke saved topics ki list hai:",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
@@ -410,8 +404,7 @@ async def message_handler(client: Client, message: Message):
                     for b in row:
                         if b.url:
                             b_style = getattr(b, "style", None)
-                            b_emoji = getattr(b, "icon_custom_emoji_id", None)
-                            row_items.append((b.text, b.url, b_style, b_emoji))
+                            row_items.append((b.text, b.url, b_style))
                     if row_items:
                         if len(row_items) < 3:
                             row_items.append(None)
@@ -433,29 +426,14 @@ async def message_handler(client: Client, message: Message):
         except Exception as e:
             await message.reply_text(f"❌ Error: {str(e)}")
 
-    # Step 1: Custom Emoji ID Input
-    elif state == "WAITING_BTN_EMOJI":
-        emoji_input = message.text.strip()
-        try:
-            session["temp_emoji_id"] = int(emoji_input) if emoji_input != "0" else None
-        except ValueError:
-            session["temp_emoji_id"] = None
-
-        session["state"] = "WAITING_BTN_NAME"
-        await message.reply_text(
-            "✅ Emoji ID saved!\n\n📝 **Ab Button ka Name (Text) bhejein:**"
-        )
-
-    # Step 2: Button Name Input
     elif state == "WAITING_BTN_NAME":
         session["temp_name"] = message.text.strip()
         session["state"] = "WAITING_STYLE_CHOICE"
         await message.reply_text(
-            f"✅ Button Name: <b>{session['temp_name']}</b>\n\n🎨 **Button ka Style Select Karein:**",
+            f"✅ Button Name: <b>{session['temp_name']}</b>\n\n🎨 **Style Select Karein:**",
             reply_markup=style_selection_keyboard()
         )
 
-    # Step 3: Button URL Input
     elif state == "WAITING_BTN_URL":
         url = message.text.strip()
         if not (url.startswith("http://") or url.startswith("https://") or url.startswith("t.me/")):
@@ -465,17 +443,15 @@ async def message_handler(client: Client, message: Message):
         r, c = session["target_pos"]
         btn_name = session["temp_name"]
         btn_style = session.get("selected_style", None)
-        btn_emoji_id = session.get("temp_emoji_id", None)
 
-        session["grid"][r][c] = (btn_name, url, btn_style, btn_emoji_id)
+        session["grid"][r][c] = (btn_name, url, btn_style)
         if len(session["grid"][r]) < 3 and session["grid"][r][-1] is not None:
             session["grid"][r].append(None)
 
         session["state"] = "BUILDING"
         markup = build_preview_keyboard(session["grid"])
-        sent = await client.send_message(
-            chat_id=user_id,
-            text=f"✨ **Button Added Successfully!**\n\n<b>🔍 Current Live Preview:</b>\n\n{session['text']}",
+        sent = await message.reply_text(
+            f"✨ **Button Added!**\n\n<b>🔍 Current Preview:</b>\n\n{session['text']}",
             reply_markup=markup
         )
         session["preview_msg_id"] = sent.id
@@ -528,6 +504,7 @@ async def message_handler(client: Client, message: Message):
 async def callback_handler(client: Client, query: CallbackQuery):
     data = query.data
 
+    # Delete Channel
     if data.startswith("del_ch_"):
         ch_db_id = data.replace("del_ch_", "")
         await channels_collection.delete_one({"_id": ObjectId(ch_db_id)})
@@ -535,6 +512,7 @@ async def callback_handler(client: Client, query: CallbackQuery):
         await query.message.delete()
         return
 
+    # Delete Topic
     if data.startswith("del_tp_"):
         tp_db_id = data.replace("del_tp_", "")
         await topics_collection.delete_one({"_id": ObjectId(tp_db_id)})
@@ -570,11 +548,11 @@ async def callback_handler(client: Client, query: CallbackQuery):
     if data.startswith("add_") and data != "add_row":
         _, r, c = data.split("_")
         session["target_pos"] = (int(r), int(c))
-        session["state"] = "WAITING_BTN_EMOJI"
+        session["state"] = "WAITING_BTN_NAME"
         await query.answer()
         await client.send_message(
             chat_id=user_id,
-            text=f"➕ **Row {int(r)+1}, Col {int(c)+1}** ke liye sabse pehle **Custom Emoji ID** bhejein:\n(Jaise: <code>5368324170671202286</code> ya agar emoji nahi chahiye toh <code>0</code> likhein)"
+            text=f"➕ **Row {int(r)+1}, Col {int(c)+1}** ke liye Button Name bhejein:"
         )
 
     elif data.startswith("style_"):
@@ -654,18 +632,12 @@ async def callback_handler(client: Client, query: CallbackQuery):
             if valid_row:
                 row_btns = []
                 for b in valid_row:
-                    b_name = b[0]
-                    b_url = b[1]
+                    b_name, b_url = b[0], b[1]
                     b_style = b[2] if len(b) > 2 else None
-                    b_emoji_id = b[3] if len(b) > 3 else None
-                    
-                    kwargs = {"text": b_name, "url": b_url}
                     if b_style:
-                        kwargs["style"] = b_style
-                    if b_emoji_id:
-                        kwargs["icon_custom_emoji_id"] = b_emoji_id
-                        
-                    row_btns.append(InlineKeyboardButton(**kwargs))
+                        row_btns.append(InlineKeyboardButton(b_name, url=b_url, style=b_style))
+                    else:
+                        row_btns.append(InlineKeyboardButton(b_name, url=b_url))
                 final_grid.append(row_btns)
 
         final_markup = InlineKeyboardMarkup(final_grid) if final_grid else None
