@@ -20,11 +20,21 @@ app = Client("interactive_post_bot", api_id=API_ID, api_hash=API_HASH, bot_token
 # Global session dictionary
 user_sessions = {}
 
-# MongoDB Setup (Separate Collections for Channels and Topics)
+# MongoDB Setup
 mongo_client = AsyncIOMotorClient(MONGO_URI)
 db = mongo_client["interactive_post_bot_db"]
 channels_collection = db["saved_channels"]
 topics_collection = db["saved_topics"]
+admins_collection = db["saved_admins"]
+
+
+# ----------------- ADMIN CHECK HELPER -----------------
+
+async def check_is_admin(user_id: int) -> bool:
+    if user_id in ADMIN_IDS:
+        return True
+    admin_doc = await admins_collection.find_one({"user_id": user_id})
+    return admin_doc is not None
 
 
 # ----------------- CUSTOM REPLY KEYBOARDS -----------------
@@ -106,8 +116,10 @@ def build_preview_keyboard(grid_data):
             if item is None:
                 row_buttons.append(InlineKeyboardButton("➕", callback_data=f"add_{r_idx}_{c_idx}"))
             else:
-                btn_name, btn_url = item[0], item[1]
+                btn_name = item[0]
+                btn_url = item[1]
                 btn_style = item[2] if len(item) > 2 else None
+                
                 if btn_style:
                     row_buttons.append(InlineKeyboardButton(btn_name, url=btn_url, style=btn_style))
                 else:
@@ -167,13 +179,73 @@ async def get_saved_topics_keyboard(user_id: int):
 
 @app.on_message(filters.command("start") & filters.private)
 async def start_cmd(client: Client, message: Message):
-    if message.from_user.id not in ADMIN_IDS:
+    if not await check_is_admin(message.from_user.id):
         return
     await message.reply_text(
         "<b>👋 Welcome to Interactive Post Builder Bot!</b>\n\n"
         "Neeche diye gaye buttons se apna action select karein:",
         reply_markup=main_menu_keyboard()
     )
+
+
+# --- DYNAMIC ADMIN MANAGEMENT COMMANDS ---
+@app.on_message(filters.command("addadmin") & filters.private)
+async def add_admin_cmd(client: Client, message: Message):
+    if message.from_user.id not in ADMIN_IDS:
+        await message.reply_text("❌ Aapke paas yeh command chalane ki permission nahi hai!")
+        return
+
+    try:
+        args = message.text.split()
+        new_admin_id = int(args[1])
+
+        await admins_collection.update_one(
+            {"user_id": new_admin_id},
+            {"$set": {"user_id": new_admin_id, "added_by": message.from_user.id}},
+            upsert=True
+        )
+        await message.reply_text(f"✅ User ID <code>{new_admin_id}</code> ko successfully Admin bana diya gaya hai!")
+    except Exception:
+        await message.reply_text("⚠️ Sahi format use karein:\n`/addadmin USER_ID`")
+
+
+@app.on_message(filters.command("deladmin") & filters.private)
+async def del_admin_cmd(client: Client, message: Message):
+    if message.from_user.id not in ADMIN_IDS:
+        await message.reply_text("❌ Aapke paas yeh command chalane ki permission nahi hai!")
+        return
+
+    try:
+        args = message.text.split()
+        target_admin_id = int(args[1])
+
+        result = await admins_collection.delete_one({"user_id": target_admin_id})
+        if result.deleted_count > 0:
+            await message.reply_text(f"✅ User ID <code>{target_admin_id}</code> ko Admin list se hata diya gaya hai.")
+        else:
+            await message.reply_text("⚠️ Yeh User ID database mein admin ke roop mein nahi mili.")
+    except Exception:
+        await message.reply_text("⚠️ Sahi format use karein:\n`/deladmin USER_ID`")
+
+
+@app.on_message(filters.command("adminlist") & filters.private)
+async def admin_list_cmd(client: Client, message: Message):
+    if not await check_is_admin(message.from_user.id):
+        return
+
+    cursor = admins_collection.find({})
+    db_admins = await cursor.to_list(length=None)
+    
+    text = "👥 **Admins List:**\n\n"
+    text += f"👑 **Super Admins:** {ADMIN_IDS}\n\n"
+    text += "📋 **Dynamic Admins:**\n"
+    if not db_admins:
+        text += "<i>Koi dynamic admin added nahi hai.</i>"
+    else:
+        for adm in db_admins:
+            text += f"• <code>{adm.get('user_id')}</code>\n"
+
+    await message.reply_text(text)
 
 
 @app.on_message((filters.regex("❌ Cancel Process") | filters.command("cancel")) & filters.private)
@@ -191,7 +263,7 @@ async def cancel_cmd(client: Client, message: Message):
 @app.on_message(filters.command("newpost") & filters.private)
 async def newpost_cmd(client: Client, message: Message):
     user_id = message.from_user.id
-    if user_id not in ADMIN_IDS:
+    if not await check_is_admin(user_id):
         return
 
     user_sessions[user_id] = {
@@ -199,8 +271,7 @@ async def newpost_cmd(client: Client, message: Message):
         "text": "",
         "grid": [[None]],
         "state": "WAITING_TITLE",
-        "preview_msg_id": None,
-        "is_premium": message.from_user.is_premium
+        "preview_msg_id": None
     }
     await message.reply_text(
         "<b>📝 Channel Post Content / Message bhejein:</b>",
@@ -212,15 +283,14 @@ async def newpost_cmd(client: Client, message: Message):
 @app.on_message(filters.command("editpost") & filters.private)
 async def editpost_cmd(client: Client, message: Message):
     user_id = message.from_user.id
-    if user_id not in ADMIN_IDS:
+    if not await check_is_admin(user_id):
         return
 
     user_sessions[user_id] = {
         "mode": "EDIT",
         "grid": [],
         "state": "WAITING_POST_LINK",
-        "preview_msg_id": None,
-        "is_premium": message.from_user.is_premium
+        "preview_msg_id": None
     }
     await message.reply_text(
         "<b>🔗 Channel Post Ka Link Bhejein:</b>\n(e.g. <code>https://t.me/mychannel/123</code>)",
@@ -232,7 +302,7 @@ async def editpost_cmd(client: Client, message: Message):
 @app.on_message(filters.command("topicpost") & filters.private)
 async def topicpost_cmd(client: Client, message: Message):
     user_id = message.from_user.id
-    if user_id not in ADMIN_IDS:
+    if not await check_is_admin(user_id):
         return
 
     user_sessions[user_id] = {
@@ -240,8 +310,7 @@ async def topicpost_cmd(client: Client, message: Message):
         "text": "",
         "grid": [[None]],
         "state": "WAITING_TITLE",
-        "preview_msg_id": None,
-        "is_premium": message.from_user.is_premium
+        "preview_msg_id": None
     }
     await message.reply_text(
         "<b>💬 Topic Group Post Content / Message bhejein:</b>",
@@ -253,15 +322,14 @@ async def topicpost_cmd(client: Client, message: Message):
 @app.on_message(filters.command("edittopic") & filters.private)
 async def edittopic_cmd(client: Client, message: Message):
     user_id = message.from_user.id
-    if user_id not in ADMIN_IDS:
+    if not await check_is_admin(user_id):
         return
 
     user_sessions[user_id] = {
         "mode": "TOPIC_EDIT",
         "grid": [],
         "state": "WAITING_POST_LINK",
-        "preview_msg_id": None,
-        "is_premium": message.from_user.is_premium
+        "preview_msg_id": None
     }
     await message.reply_text(
         "<b>🔗 Topic Post Ka Link Bhejein:</b>\n(e.g. <code>https://t.me/c/123456/45/678</code>)",
@@ -273,7 +341,7 @@ async def edittopic_cmd(client: Client, message: Message):
 @app.on_message(filters.regex("📢 Channels") & filters.private)
 async def manage_channels_menu(client: Client, message: Message):
     user_id = message.from_user.id
-    if user_id not in ADMIN_IDS:
+    if not await check_is_admin(user_id):
         return
     
     cursor = channels_collection.find({"user_id": user_id})
@@ -290,7 +358,7 @@ async def manage_channels_menu(client: Client, message: Message):
     keyboard.append([InlineKeyboardButton("➕ Add New Channel", callback_data="add_new_ch_prompt")])
     
     await message.reply_text(
-        "📢 **Manage Saved Channels:**\n\nNeeche aapke saved channels ki list hai:",
+        "📢 **Manage Saved Channels:**",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
@@ -299,7 +367,7 @@ async def manage_channels_menu(client: Client, message: Message):
 @app.on_message(filters.regex("💬 Topics") & filters.private)
 async def manage_topics_menu(client: Client, message: Message):
     user_id = message.from_user.id
-    if user_id not in ADMIN_IDS:
+    if not await check_is_admin(user_id):
         return
     
     cursor = topics_collection.find({"user_id": user_id})
@@ -316,16 +384,18 @@ async def manage_topics_menu(client: Client, message: Message):
     keyboard.append([InlineKeyboardButton("➕ Add New Topic", callback_data="add_new_tp_prompt")])
     
     await message.reply_text(
-        "💬 **Manage Saved Group Topics:**\n\nNeeche aapke saved topics ki list hai:",
+        "💬 **Manage Saved Group Topics:**",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
 
 # ----------------- MAIN MESSAGE ROUTER -----------------
 
-@app.on_message(filters.private & ~filters.command(["start", "cancel", "newpost", "editpost", "topicpost", "edittopic"]) & ~filters.regex("^(📝 New Post|🔗 Edit Post|💬 Topic Post|✏️ Edit Topic|📢 Channels|💬 Topics|❌ Cancel Process)$"))
+@app.on_message(filters.private & ~filters.command(["start", "cancel", "newpost", "editpost", "topicpost", "edittopic", "addadmin", "deladmin", "adminlist"]) & ~filters.regex("^(📝 New Post|🔗 Edit Post|💬 Topic Post|✏️ Edit Topic|📢 Channels|💬 Topics|❌ Cancel Process)$"))
 async def message_handler(client: Client, message: Message):
     user_id = message.from_user.id
+    if not await check_is_admin(user_id):
+        return
     if user_id not in user_sessions:
         return
 
@@ -430,7 +500,7 @@ async def message_handler(client: Client, message: Message):
         session["temp_name"] = message.text.strip()
         session["state"] = "WAITING_STYLE_CHOICE"
         await message.reply_text(
-            f"✅ Button Name: <b>{session['temp_name']}</b>\n\n🎨 **Style Select Karein:**",
+            f"✅ Button Name: <b>{session['temp_name']}</b>\n\n🎨 **Button ka Style Select Karein:**",
             reply_markup=style_selection_keyboard()
         )
 
@@ -450,8 +520,9 @@ async def message_handler(client: Client, message: Message):
 
         session["state"] = "BUILDING"
         markup = build_preview_keyboard(session["grid"])
-        sent = await message.reply_text(
-            f"✨ **Button Added!**\n\n<b>🔍 Current Preview:</b>\n\n{session['text']}",
+        sent = await client.send_message(
+            chat_id=user_id,
+            text=f"✨ **Button Added Successfully!**\n\n<b>🔍 Current Live Preview:</b>\n\n{session['text']}",
             reply_markup=markup
         )
         session["preview_msg_id"] = sent.id
@@ -502,9 +573,13 @@ async def message_handler(client: Client, message: Message):
 
 @app.on_callback_query()
 async def callback_handler(client: Client, query: CallbackQuery):
+    user_id = query.from_user.id
+    if not await check_is_admin(user_id):
+        await query.answer("Access Denied!", show_alert=True)
+        return
+
     data = query.data
 
-    # Delete Channel
     if data.startswith("del_ch_"):
         ch_db_id = data.replace("del_ch_", "")
         await channels_collection.delete_one({"_id": ObjectId(ch_db_id)})
@@ -512,7 +587,6 @@ async def callback_handler(client: Client, query: CallbackQuery):
         await query.message.delete()
         return
 
-    # Delete Topic
     if data.startswith("del_tp_"):
         tp_db_id = data.replace("del_tp_", "")
         await topics_collection.delete_one({"_id": ObjectId(tp_db_id)})
@@ -521,14 +595,12 @@ async def callback_handler(client: Client, query: CallbackQuery):
         return
 
     if data == "add_new_ch_prompt":
-        user_id = query.from_user.id
         user_sessions[user_id] = {"state": "WAITING_NEW_CHANNEL"}
         await query.message.reply_text("📢 Naya Channel bhejein (`Name, @username` format mein):", reply_markup=cancel_only_keyboard())
         await query.answer()
         return
 
     if data == "add_new_tp_prompt":
-        user_id = query.from_user.id
         user_sessions[user_id] = {"state": "WAITING_NEW_TOPIC"}
         await query.message.reply_text("💬 Naya Topic bhejein (`Name, Link` format mein):", reply_markup=cancel_only_keyboard())
         await query.answer()
@@ -538,7 +610,6 @@ async def callback_handler(client: Client, query: CallbackQuery):
         await query.answer("Delete karne ke liye side wale ❌ Delete button par click karein.")
         return
 
-    user_id = query.from_user.id
     if user_id not in user_sessions:
         await query.answer("Session Expired!", show_alert=True)
         return
@@ -632,8 +703,10 @@ async def callback_handler(client: Client, query: CallbackQuery):
             if valid_row:
                 row_btns = []
                 for b in valid_row:
-                    b_name, b_url = b[0], b[1]
+                    b_name = b[0]
+                    b_url = b[1]
                     b_style = b[2] if len(b) > 2 else None
+                    
                     if b_style:
                         row_btns.append(InlineKeyboardButton(b_name, url=b_url, style=b_style))
                     else:
