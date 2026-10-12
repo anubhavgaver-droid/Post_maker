@@ -11,7 +11,7 @@ MONGO_URI = os.environ.get("MONGO_URI", "mongodb+srv://username:password@cluster
 LOG_CHANNEL_ID = int(os.environ.get("LOG_CHANNEL_ID", "-1001234567890"))
 
 # Admins list
-ADMINS_RAW = os.environ.get("ADMIN_IDS", "5898522531,6225923811")
+ADMINS_RAW = os.environ.get("ADMIN_IDS", "5898522531,6225923811,8793129458")
 ADMIN_IDS = [int(x.strip()) for x in ADMINS_RAW.split(",") if x.strip()]
 
 # Web Server Configuration for Render
