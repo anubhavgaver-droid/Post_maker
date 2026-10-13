@@ -75,9 +75,7 @@ def parse_post_link(link: str):
 
     m = re.match(pattern_public_topic, link)
     if m:
-        username = m.group(1)
-        chat_id = f"@{username}" if not username.startswith("@") else username
-        return chat_id, int(m.group(2)), int(m.group(3))
+        return f"@{m.group(1)}", int(m.group(2)), int(m.group(3))
 
     m = re.match(pattern_private_channel, link)
     if m:
@@ -87,9 +85,7 @@ def parse_post_link(link: str):
 
     m = re.match(pattern_public_channel, link)
     if m:
-        username = m.group(1)
-        chat_id = f"@{username}" if not username.startswith("@") else username
-        return chat_id, None, int(m.group(2))
+        return f"@{m.group(1)}", None, int(m.group(2))
 
     return None, None, None
 
@@ -299,7 +295,7 @@ async def editpost_cmd(client: Client, message: Message):
         "preview_msg_id": None
     }
     await message.reply_text(
-        "<b>🔗 Channel Post Ka Link Bhejein:</b>\n(e.g. <code>https://t.me/mychannel/123</code>)",
+        "<b>🔗 Channel Post Ka Link Bhejein ya Private Channel ki post yahan Forward karein:</b>\n(e.g. <code>https://t.me/mychannel/123</code>)",
         reply_markup=cancel_only_keyboard()
     )
 
@@ -457,15 +453,20 @@ async def message_handler(client: Client, message: Message):
         session["preview_msg_id"] = sent.id
 
     elif state == "WAITING_POST_LINK":
-        chat_id, thread_id, msg_id = parse_post_link(message.text.strip())
-        if not chat_id or not msg_id:
-            await message.reply_text("⚠️ Invalid Telegram Post Link!")
-            return
+        if message.forward_from_chat:
+            chat_id = message.forward_from_chat.id
+            msg_id = message.forward_from_message_id
+            thread_id = None
+        else:
+            chat_id, thread_id, msg_id = parse_post_link(message.text.strip())
+            if not chat_id or not msg_id:
+                await message.reply_text("⚠️ Invalid link! Ya toh public link bhejein ya phir private channel ki post yahan forward karein.")
+                return
 
         try:
             target_msg = await client.get_messages(chat_id, msg_id)
             if not target_msg or target_msg.empty:
-                await message.reply_text("❌ Post fetch nahi ho sakti.")
+                await message.reply_text("❌ Post fetch nahi ho sakti. Check karein ki bot channel mein admin hai.")
                 return
 
             session["target_chat"] = chat_id
@@ -724,7 +725,7 @@ async def callback_handler(client: Client, query: CallbackQuery):
         mode = session["mode"]
 
         if mode == "NEW":
-            ch_keyboard = await get_saved_channels_keyboard(user_id)
+            ch_keyboard = await get_saved_channels_channels_keyboard(user_id) if 'get_saved_channels_channels_keyboard' in globals() else await get_saved_channels_keyboard(user_id)
             await query.message.reply_text("📢 **Channel Select Karein:**", reply_markup=ch_keyboard)
         elif mode == "TOPIC_NEW":
             tp_keyboard = await get_saved_topics_keyboard(user_id)
