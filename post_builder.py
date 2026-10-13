@@ -69,21 +69,27 @@ def parse_post_link(link: str):
 
     m = re.match(pattern_private_topic, link)
     if m:
-        chat_id = int(f"-100{m.group(1)}") if not m.group(1).startswith("-100") else int(m.group(1))
+        group_id = m.group(1)
+        chat_id = int(f"-100{group_id}") if not group_id.startswith("-100") else int(group_id)
         return chat_id, int(m.group(2)), int(m.group(3))
 
     m = re.match(pattern_public_topic, link)
     if m:
-        return f"@{m.group(1)}", int(m.group(2)), int(m.group(3))
+        username = m.group(1)
+        chat_id = f"@{username}" if not username.startswith("@") else username
+        return chat_id, int(m.group(2)), int(m.group(3))
 
     m = re.match(pattern_private_channel, link)
     if m:
-        chat_id = int(f"-100{m.group(1)}") if not m.group(1).startswith("-100") else int(m.group(1))
+        group_id = m.group(1)
+        chat_id = int(f"-100{group_id}") if not group_id.startswith("-100") else int(group_id)
         return chat_id, None, int(m.group(2))
 
     m = re.match(pattern_public_channel, link)
     if m:
-        return f"@{m.group(1)}", None, int(m.group(2))
+        username = m.group(1)
+        chat_id = f"@{username}" if not username.startswith("@") else username
+        return chat_id, None, int(m.group(2))
 
     return None, None, None
 
