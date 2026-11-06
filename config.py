@@ -4,8 +4,9 @@ API_ID = int(os.environ.get("API_ID", "1234567"))
 API_HASH = os.environ.get("API_HASH", "YOUR_API_HASH")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "YOUR_BOT_TOKEN")
 
-# MongoDB URI for Clones, Data & Saved Channels
+# MongoDB URI for saved channels, topics, templates and posts
 MONGO_URI = os.environ.get("MONGO_URI", "mongodb+srv://username:password@cluster.mongodb.net/?retryWrites=true&w=majority")
+DB_NAME = os.environ.get("DB_NAME", "interactive_post_bot_db")  # same name as before, so saved channels stay
 
 # Log Channel ID for Clone Requests
 LOG_CHANNEL_ID = int(os.environ.get("LOG_CHANNEL_ID", "-1001234567890"))
@@ -14,6 +15,6 @@ LOG_CHANNEL_ID = int(os.environ.get("LOG_CHANNEL_ID", "-1001234567890"))
 ADMINS_RAW = os.environ.get("ADMIN_IDS", "5898522531,6225923811,8793129458")
 ADMIN_IDS = [int(x.strip()) for x in ADMINS_RAW.split(",") if x.strip()]
 
-# Web Server Configuration for Render
-PORT = int(os.environ.get("PORT", "8080"))
+# Web Server Configuration for Render (Render sets PORT itself, default 10000)
+PORT = int(os.environ.get("PORT", "10000"))
 PING_INTERVAL = 240  # Self ping every 4 minutes (240 seconds)
