@@ -18,7 +18,7 @@ MAX_BLOCKS = 40
 
 def new_session(blocks=None, edit_post=None) -> dict:
     return {"mode": "RICH", "state": "RICH", "blocks": blocks or [], "await": None, "panel": None, "preview": None,
-            "opts": [], "sel": set(), "edit_post": edit_post}
+            "opts": [], "sel": set(), "edit_post": edit_post, "silent": False, "pin": False}
 
 
 # ---------- tiny rich-html helpers ----------
@@ -112,10 +112,12 @@ def prompt_view(kind: str, current: str = ""):
 
 def chooser_view(s: dict):
     body = "<h2>🚀 PUBLISH</h2>" + P("Jahan post karni hai unhe ✅ karein, phir <b>Publish</b> dabayein.")
+    if "<tg-emoji" in B.render(s["blocks"]):
+        body += P("✨ <i>Is post mein premium emoji hain. Channel mein Telegram bots ko ye tabhi allow karta hai jab bot ke paas Fragment username ho - warna normal emoji dikhega. Pakka test: /emojicheck</i>")
     if not s["opts"]:
         body += P("<i>Koi saved channel/topic nahi. ➕ Custom use karein ya main menu se 📢 Channels mein add karein.</i>")
     rows = [row(*[cb(label, f"rp:tg:{action}", "success" if action == "go" else ("danger" if action == "back" else "primary")) for label, action in r])
-            for r in T.chooser_pairs(s["opts"], s["sel"])]
+            for r in T.chooser_pairs(s["opts"], s["sel"], s["silent"], s["pin"])]
     return body, rows
 
 
@@ -198,15 +200,31 @@ async def publish(client, uid: int, s: dict):
     if not chosen:
         return await show(client, uid, s, *chooser_view(s))
     h = B.render(s["blocks"])
-    lines, done = [], []
+    uses_emoji = "<tg-emoji" in h
+    lines, done, warned = [], [], False
     for o in chosen:
-        res, fb = await tgapi.send_rich(o["chat_id"], h, o.get("thread_id"))
+        res, fb = await tgapi.send_rich(o["chat_id"], h, o.get("thread_id"), silent=s["silent"])
         if res.get("ok"):
             mid = res["result"]["message_id"]
             done.append({"chat_id": o["chat_id"], "message_id": mid, "thread_id": o.get("thread_id"), "name": o["label"]})
-            lines.append(_line(o["label"], T.post_link(o["chat_id"], mid), fb))
+            line = _line(o["label"], T.post_link(o["chat_id"], mid), fb)
+            if s["pin"]:
+                pr = await tgapi.pin(o["chat_id"], mid)
+                line += " 📌" if pr.get("ok") else f" ⚠️ pin fail: <code>{esc(tgapi.desc(pr))}</code>"
+            if uses_emoji:  # say it loudly when the premium emoji probably did not make it
+                cap = tgapi.CAPS.get(o["chat_id"], {}).get("body")
+                kind = await tgapi.chat_kind(o["chat_id"])
+                if fb or cap is False:
+                    line += "<br/>⚠️ Premium emoji nahi gaye - normal emoji se post hui."
+                    warned = True
+                elif cap is None and kind == "channel":
+                    line += "<br/>⚠️ Channel mein premium emoji shayad normal dikhein (Telegram rule)."
+                    warned = True
+            lines.append(line)
         else:
             lines.append(f"❌ {esc(o['label'])}: <code>{esc(tgapi.desc(res))}</code>")
+    if warned:
+        lines.append("ℹ️ Pakka pata karne ke liye /emojicheck chalayein - wo asli test karke batata hai.")
     if done:
         doc = {"user_id": uid, "title": B.title_of(s["blocks"]), "blocks": s["blocks"], "targets": done, "ts": time.time()}
         ins = await db.rich_posts.insert_one(doc)
@@ -320,6 +338,9 @@ async def callback(client, query, sessions: dict):
         elif action == "custom":
             s["await"] = {"kind": "custom"}
             await show(client, uid, s, *prompt_view("custom"))
+        elif action in ("silent", "pin"):
+            s[action] = not s[action]
+            await show(client, uid, s, *chooser_view(s))
         elif action.startswith("toggle:"):
             key = action[7:]
             s["sel"] ^= {key}

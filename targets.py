@@ -19,9 +19,10 @@ async def load_options(uid: int, kinds: str) -> list:
     return opts
 
 
-def chooser_pairs(opts: list, selected: set) -> list:
-    """Rows of (label, action). Actions: 'toggle:<key>' | 'custom' | 'go' | 'back'"""
+def chooser_pairs(opts: list, selected: set, silent: bool = False, pin: bool = False) -> list:
+    """Rows of (label, action). Actions: 'toggle:<key>' | 'silent' | 'pin' | 'custom' | 'go' | 'back'"""
     rows = [[(("✅ " if o["key"] in selected else "⬜ ") + f"{o['icon']} {o['label']}", f"toggle:{o['key']}")] for o in opts]
+    rows.append([("🔕 Silent " + ("✅" if silent else "⬜"), "silent"), ("📌 Pin " + ("✅" if pin else "⬜"), "pin")])
     rows.append([("➕ Custom", "custom"), (f"🚀 Publish ({len(selected)})", "go")])
     rows.append([("⬅️ Back", "back")])
     return rows

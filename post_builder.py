@@ -1,5 +1,8 @@
 import asyncio
+import functools
 import html
+import logging
+import os
 import re
 
 from bson import ObjectId
@@ -14,11 +17,12 @@ from pyrogram.types import (
 
 import blocks as B
 import db
+import emojicheck
 import rich_flow
 import targets as T
 import tgapi
 from config import API_ID, API_HASH, BOT_TOKEN, ADMIN_IDS
-from entities import custom_emoji_ids, entities_to_html, split_icon_html
+from entities import custom_emoji_ids, entities_to_html, first_custom_emoji, split_icon_html
 from server import start_web_server, self_ping_loop
 
 app = Client("interactive_post_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN,
@@ -32,7 +36,7 @@ MENU = {
     "rich": "🎨 Rich Post", "posts": "📚 My Rich Posts", "channels": "📢 Channels", "topics": "💬 Topics",
     "cancel": "❌ Cancel Process",
 }
-COMMANDS = ["start", "help", "cancel", "newpost", "editpost", "topicpost", "edittopic", "richpost", "addadmin", "deladmin", "adminlist"]
+COMMANDS = ["start", "help", "cancel", "newpost", "editpost", "topicpost", "edittopic", "richpost", "emojicheck", "addadmin", "deladmin", "adminlist"]
 MENU_RE = filters.regex(r"^(?:" + "|".join(re.escape(v) for v in MENU.values()) + r")$")
 
 
@@ -69,6 +73,29 @@ def style_selection_keyboard():
         [InlineKeyboardButton("🟦 Primary", callback_data="style_primary"), InlineKeyboardButton("🟩 Success", callback_data="style_success")],
         [InlineKeyboardButton("🟥 Danger", callback_data="style_danger"), InlineKeyboardButton("⚪ Normal", callback_data="style_normal")],
     ])
+
+
+def safe(fn):
+    """Any crash inside a handler is shown to the admin (instead of the bot going silent)."""
+    @functools.wraps(fn)
+    async def wrapper(client, update):
+        try:
+            return await fn(client, update)
+        except Exception as e:
+            if os.getenv("DEBUG_RAISE") == "1":
+                raise
+            logging.exception("handler error")
+            try:
+                await client.send_message(update.from_user.id, f"⚠️ <b>Error:</b> <code>{esc(type(e).__name__)}: {esc(str(e)[:200])}</code>\nPhir try karein, ya ❌ Cancel Process dabayein.")
+                if hasattr(update, "answer"):
+                    await update.answer()
+            except Exception:
+                pass
+    return wrapper
+
+
+def chooser_markup(session):
+    return pairs_markup(T.chooser_pairs(session["opts"], session["sel"], session.get("silent", False), session.get("pin", False)))
 
 
 def pairs_markup(rows):
@@ -174,15 +201,16 @@ def builder_grid(session):
 async def send_preview(client, uid, session, title="🔍 Live Preview"):
     """The preview IS the real post (copied), with the builder buttons under it."""
     src_chat, src_id = session["src"]
-    res, fb = await tgapi.copy_message(uid, src_chat, src_id, builder_grid(session))
+    res, info = await tgapi.copy_message(uid, src_chat, src_id, builder_grid(session))
     if not res.get("ok"):
         return await client.send_message(uid, f"❌ <b>Preview fail:</b> <code>{esc(tgapi.desc(res))}</code>", reply_markup=main_menu_keyboard())
     session["preview_id"] = res["result"]["message_id"]
-    await client.send_message(uid, f"{title} ☝️\n➕ dabakar button add karein.\n✅ <b>Publish / Update</b> se aage badhein." + ("\n<i>(Premium icon is chat mein nahi chala, normal emoji dikh raha hai)</i>" if fb else ""))
+    note = f"\n<i>(Premium icon is chat mein nahi chala: {esc(info['reason'])})</i>" if info["icons"] == "fallback" else ""
+    await client.send_message(uid, f"{title} ☝️\n➕ dabakar button add karein.\n✅ <b>Publish / Update</b> se aage badhein." + note)
 
 
 async def refresh_preview(client, uid, session):
-    res, fb = await tgapi.set_markup(uid, session["preview_id"], builder_grid(session))
+    res, info = await tgapi.set_markup(uid, session["preview_id"], builder_grid(session))
     if not res.get("ok") and "not modified" not in tgapi.desc(res).lower():
         await send_preview(client, uid, session)
 
@@ -196,7 +224,8 @@ HELP_TEXT = (
     "🎨 <b>Rich Post</b> – bade headings, text, quote, table-boxes aur rich buttons wali post.\n"
     "📚 <b>My Rich Posts</b> – publish ki hui rich posts edit / delete karo.\n\n"
     "✨ <b>Premium emoji:</b> button ke naam ke saath premium emoji bhejo = button icon. Rich post ke text mein bhi chalta hai.\n"
-    "🔎 Koi premium emoji akele bhejo (jab koi process na chal raha ho) – main uski ID bata dunga."
+    "🔎 Koi premium emoji akele bhejo (jab koi process na chal raha ho) – main uski ID bata dunga.\n"
+    "🧪 /emojicheck – asli test: kis chat mein premium emoji chalta hai, kis mein nahi."
 )
 
 
@@ -293,6 +322,18 @@ async def richpost_cmd(client, message):
     await rich_flow.open_panel(client, uid, message.chat.id, s)
 
 
+@app.on_message(filters.command("emojicheck") & filters.private)
+async def emojicheck_cmd(client, message):
+    uid = message.from_user.id
+    if not await check_is_admin(uid):
+        return
+    user_sessions[uid] = {"state": "EMO_ID"}
+    await message.reply_text(
+        "🧪 <b>Premium Emoji Test</b>\nEk <b>premium emoji</b> bhejein. Phir bataunga ki kis chat mein test karna hai.\n"
+        "Bot dekhega ki Telegram wahan text, button-icon aur rich message mein premium emoji rakhta hai ya nahi.",
+        reply_markup=cancel_only_keyboard())
+
+
 @app.on_message(_label("posts") & filters.private)
 async def myposts_cmd(client, message):
     uid = message.from_user.id
@@ -327,6 +368,7 @@ async def manage_topics_menu(client, message):
 
 # ----------------- MAIN MESSAGE ROUTER -----------------
 @app.on_message(filters.private & ~filters.command(COMMANDS) & ~MENU_RE)
+@safe
 async def message_handler(client: Client, message: Message):
     uid = message.from_user.id
     if not await check_is_admin(uid):
@@ -344,6 +386,30 @@ async def message_handler(client: Client, message: Message):
 
     if state == "RICH":
         return await rich_flow.on_text(client, message, session)
+
+    if state == "EMO_ID":
+        eid, fb = first_custom_emoji(text, message.entities)
+        if not eid:
+            return await message.reply_text("⚠️ Ek premium emoji bhejein (jo aapke Premium account se dikhta ho).")
+        session.update(emo_id=eid, emo_fb=fb, state="EMO_CHAT")
+        return await message.reply_text(
+            "✅ Emoji mil gaya.\n\nAb batayein kis chat par test karna hai:\n"
+            "◉ <code>here</code> = ye chat (PM)\n◉ <code>@channel</code> ya <code>-100123…</code>\n"
+            "\n<i>⚠️ Us chat mein 20 second ke liye 3 chhote silent test messages aayenge, phir delete ho jayenge.</i>")
+
+    if state == "EMO_CHAT":
+        if text.strip().lower() in ("here", "pm", "me"):
+            chat, where = uid, "Private chat (PM)"
+        else:
+            parsed = T.parse_custom(text)
+            if not parsed:
+                return await message.reply_text("⚠️ Samajh nahi aaya. <code>here</code>, <code>@channel</code> ya <code>-100123…</code> bhejein.")
+            chat, where = parsed[0], str(parsed[0])
+        await message.reply_text("🧪 Test chal raha hai…")
+        out = await emojicheck.probe(chat, session["emo_id"], session["emo_fb"])
+        user_sessions.pop(uid, None)
+        asyncio.create_task(emojicheck.cleanup(chat, out["ids"]))
+        return await message.reply_text(emojicheck.report(out, where), reply_markup=main_menu_keyboard())
 
     if state == "WAITING_NEW_CHANNEL":
         try:
@@ -371,6 +437,7 @@ async def message_handler(client: Client, message: Message):
 
     elif state == "WAITING_TITLE":
         session["src"] = (message.chat.id, message.id)
+        session["premium_body"] = bool(custom_emoji_ids(message.entities) or custom_emoji_ids(getattr(message, "caption_entities", None)))
         session["state"] = "BUILDING"
         await send_preview(client, uid, session)
 
@@ -441,7 +508,7 @@ async def message_handler(client: Client, message: Message):
         chat, thread = parsed
         T.add_custom(session["opts"], session["sel"], chat, thread, f"{chat}" + (f" / {thread}" if thread else ""))
         session["state"] = "BUILDING"
-        await client.send_message(uid, "📢 <b>Select karein, phir Publish:</b>", reply_markup=pairs_markup(T.chooser_pairs(session["opts"], session["sel"])))
+        await client.send_message(uid, "📢 <b>Select karein, phir Publish:</b>", reply_markup=chooser_markup(session))
 
 
 # ----------------- PUBLISH (classic) -----------------
@@ -451,20 +518,35 @@ async def publish_classic(client, uid, session):
         return await client.send_message(uid, "⚠️ Kam se kam ek channel/topic ✅ karein.")
     src_chat, src_id = session["src"]
     grid = final_grid(session["grid"])
-    lines = []
+    lines, tip = [], False
     for o in chosen:
-        res, fb = await tgapi.copy_message(o["chat_id"], src_chat, src_id, grid, o.get("thread_id"))
-        if res.get("ok"):
-            mid = res["result"]["message_id"]
-            lines.append(f'✅ {esc(o["label"])} — <a href="{esc(T.post_link(o["chat_id"], mid), quote=True)}">open</a> (<code>{mid}</code>)' + (" <i>(normal emoji use hua)</i>" if fb else ""))
-        else:
+        res, info = await tgapi.copy_message(o["chat_id"], src_chat, src_id, grid, o.get("thread_id"), silent=session.get("silent", False))
+        if not res.get("ok"):
             lines.append(f"❌ {esc(o['label'])}: <code>{esc(tgapi.desc(res))}</code>")
+            continue
+        mid = res["result"]["message_id"]
+        line = f'✅ {esc(o["label"])} — <a href="{esc(T.post_link(o["chat_id"], mid), quote=True)}">open</a>'
+        if info["icons"] == "icons":
+            line += " ✨ premium icon laga"
+        elif info["icons"] == "fallback":
+            line += f"\n⚠️ Premium icon nahi laga, normal emoji use hua.\n<code>{esc(info['reason'][:120])}</code>"
+            tip = True
+        if session.get("pin"):
+            pr = await tgapi.pin(o["chat_id"], mid)
+            line += " 📌" if pr.get("ok") else f"\n⚠️ Pin fail: <code>{esc(tgapi.desc(pr))}</code>"
+        if session.get("premium_body") and tgapi.CAPS.get(o["chat_id"], {}).get("body") is not True and await tgapi.chat_kind(o["chat_id"]) == "channel":
+            line += "\n⚠️ Post ke text ke premium emoji channel mein shayad normal dikhein."
+            tip = True
+        lines.append(line)
+    if tip:
+        lines.append("\nℹ️ Pakka pata karne ke liye /emojicheck chalayein - wo asli test karke batata hai.")
     await client.send_message(uid, "🎉 <b>Publish result</b>\n\n" + "\n".join(lines), reply_markup=main_menu_keyboard(), disable_web_page_preview=True)
     user_sessions.pop(uid, None)
 
 
 # ----------------- CALLBACK QUERY HANDLER -----------------
 @app.on_callback_query()
+@safe
 async def callback_handler(client: Client, query: CallbackQuery):
     uid = query.from_user.id
     if not await check_is_admin(uid):
@@ -568,11 +650,12 @@ async def callback_handler(client: Client, query: CallbackQuery):
         if mode in ("NEW", "TOPIC_NEW"):
             session["opts"], session["sel"] = await T.load_options(uid, "c" if mode == "NEW" else "t"), set()
             await client.send_message(uid, ("📢 <b>Channel" if mode == "NEW" else "💬 <b>Topic") + " select karein (✅ tick), phir Publish:</b>",
-                                      reply_markup=pairs_markup(T.chooser_pairs(session["opts"], session["sel"])))
+                                      reply_markup=chooser_markup(session))
         else:
-            res, fb = await tgapi.set_markup(session["target_chat"], session["target_msg_id"], grid)
+            res, info = await tgapi.set_markup(session["target_chat"], session["target_msg_id"], grid)
             if res.get("ok") or "not modified" in tgapi.desc(res).lower():
-                await client.send_message(uid, "🎉 <b>Post / Topic Live Updated!</b>" + ("\n<i>(Premium icon nahi chala, normal emoji use hua)</i>" if fb else ""), reply_markup=main_menu_keyboard())
+                note = f"\n⚠️ Premium icon nahi laga, normal emoji use hua.\n<code>{esc(info['reason'][:120])}</code>\nℹ️ Pakka test: /emojicheck" if info["icons"] == "fallback" else ""
+                await client.send_message(uid, "🎉 <b>Post / Topic Live Updated!</b>" + note, reply_markup=main_menu_keyboard())
             else:
                 await client.send_message(uid, f"❌ Error: <code>{esc(tgapi.desc(res))}</code>", reply_markup=main_menu_keyboard())
             user_sessions.pop(uid, None)
@@ -589,10 +672,14 @@ async def callback_handler(client: Client, query: CallbackQuery):
             session["state"] = "WAITING_CUSTOM_TARGET"
             await query.answer()
             await client.send_message(uid, "✍️ Channel/topic bhejein: <code>@channel</code>, <code>-100123</code>, ya topic ke liye <code>-100123, 45</code>:")
+        elif action in ("silent", "pin"):
+            session[action] = not session.get(action, False)
+            await query.answer()
+            await query.message.edit_reply_markup(chooser_markup(session))
         elif action.startswith("toggle:"):
             session["sel"] ^= {action[7:]}
             await query.answer()
-            await query.message.edit_reply_markup(pairs_markup(T.chooser_pairs(session["opts"], session["sel"])))
+            await query.message.edit_reply_markup(chooser_markup(session))
 
 
 async def main():

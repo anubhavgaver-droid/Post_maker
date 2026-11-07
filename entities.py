@@ -15,6 +15,15 @@ def custom_emoji_ids(entities) -> list:
     return [str(e.custom_emoji_id) for e in (entities or []) if etype(e) == "CUSTOM_EMOJI" and getattr(e, "custom_emoji_id", None)]
 
 
+def first_custom_emoji(text: str, entities):
+    """-> (custom emoji id, the normal emoji it stands for) of the first premium emoji, or (None, None)"""
+    for e in entities or []:
+        if etype(e) == "CUSTOM_EMOJI" and getattr(e, "custom_emoji_id", None):
+            u = (text or "").encode("utf-16-le")
+            return str(e.custom_emoji_id), u[2 * e.offset:2 * (e.offset + e.length)].decode("utf-16-le", errors="ignore") or "⭐"
+    return None, None
+
+
 def entities_to_html(text: str, entities) -> str:
     """Text + entities -> escaped HTML (b i u s code spoiler, links, <tg-emoji> for premium emoji).
     Entities that only partly overlap are closed and re-opened so the result is always well-formed."""
