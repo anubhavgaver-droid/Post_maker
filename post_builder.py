@@ -21,6 +21,7 @@ import emojicheck
 import rich_flow
 import targets as T
 import tgapi
+import userpost
 from config import API_ID, API_HASH, BOT_TOKEN, ADMIN_IDS
 from entities import custom_emoji_ids, entities_to_html, first_custom_emoji, split_icon_html
 from server import start_web_server, self_ping_loop
@@ -28,6 +29,7 @@ from server import start_web_server, self_ping_loop
 app = Client("interactive_post_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN,
              in_memory=True, parse_mode=enums.ParseMode.HTML)
 
+BOT_USERNAME = ""
 user_sessions = {}  # user id -> session dict (classic builder or rich builder)
 esc = html.escape
 
@@ -36,7 +38,7 @@ MENU = {
     "rich": "🎨 Rich Post", "posts": "📚 My Rich Posts", "channels": "📢 Channels", "topics": "💬 Topics",
     "cancel": "❌ Cancel Process",
 }
-COMMANDS = ["start", "help", "cancel", "newpost", "editpost", "topicpost", "edittopic", "richpost", "emojicheck", "addadmin", "deladmin", "adminlist"]
+COMMANDS = ["start", "help", "cancel", "newpost", "editpost", "topicpost", "edittopic", "richpost", "emojicheck", "userbot", "addadmin", "deladmin", "adminlist"]
 MENU_RE = filters.regex(r"^(?:" + "|".join(re.escape(v) for v in MENU.values()) + r")$")
 
 
@@ -95,7 +97,8 @@ def safe(fn):
 
 
 def chooser_markup(session):
-    return pairs_markup(T.chooser_pairs(session["opts"], session["sel"], session.get("silent", False), session.get("pin", False)))
+    as_user = session.get("as_user", False) if (userpost.enabled() and session.get("mode") in ("NEW", "TOPIC_NEW")) else None
+    return pairs_markup(T.chooser_pairs(session["opts"], session["sel"], session.get("silent", False), session.get("pin", False), as_user))
 
 
 def pairs_markup(rows):
@@ -225,7 +228,8 @@ HELP_TEXT = (
     "📚 <b>My Rich Posts</b> – publish ki hui rich posts edit / delete karo.\n\n"
     "✨ <b>Premium emoji:</b> button ke naam ke saath premium emoji bhejo = button icon. Rich post ke text mein bhi chalta hai.\n"
     "🔎 Koi premium emoji akele bhejo (jab koi process na chal raha ho) – main uski ID bata dunga.\n"
-    "🧪 /emojicheck – asli test: kis chat mein premium emoji chalta hai, kis mein nahi."
+    "🧪 /emojicheck – asli test: kis chat mein premium emoji chalta hai, kis mein nahi.\n"
+    "👤 /userbot – Premium account se channel post (text ke premium emoji channel mein bhi)."
 )
 
 
@@ -334,6 +338,32 @@ async def emojicheck_cmd(client, message):
         reply_markup=cancel_only_keyboard())
 
 
+@app.on_message(filters.command("userbot") & filters.private)
+async def userbot_cmd(client, message):
+    uid = message.from_user.id
+    if not await check_is_admin(uid):
+        return
+    if not userpost.enabled():
+        return await message.reply_text(
+            "👤 <b>Premium account (userbot) OFF hai.</b>\n\n"
+            "Isse channel mein post ke text ke premium emoji bhi chalte hain.\n"
+            "1) Apne computer/Termux par <code>python gen_session.py</code> chalakar session string banayein.\n"
+            "2) Render Environment mein <code>USER_SESSION_STRING</code> mein daalein, redeploy karein.\n\n"
+            "⚠️ Session string = aapke poore account ki chaabi. Kisi ko na dein, GitHub par na daalein.")
+    me = await userpost.me()
+    text = (f"👤 <b>Premium account ON</b>\nNaam: {esc(me.first_name or '')}  <code>{me.id}</code>\n"
+            f"Premium: {'✅' if getattr(me, 'is_premium', None) else '❌ (Premium nahi dikh raha)'}\n"
+            f"{'✅ Ye wahi account hai jisse aap bot ko content bhejte hain.' if me.id == uid else '⚠️ Ye account aapke Telegram account se alag hai - content isi account se bhejna padega.'}")
+    if len(message.command) > 1:
+        parsed = T.parse_custom(message.command[1])
+        if parsed:
+            botme = await client.get_me()
+            text += f"\n\n🔎 <b>{esc(str(parsed[0]))}</b>\n" + await userpost.check_chat(parsed[0], botme.id)
+    else:
+        text += "\n\nKisi channel ko check karne ke liye: <code>/userbot @channel</code>"
+    await message.reply_text(text)
+
+
 @app.on_message(_label("posts") & filters.private)
 async def myposts_cmd(client, message):
     uid = message.from_user.id
@@ -438,6 +468,7 @@ async def message_handler(client: Client, message: Message):
     elif state == "WAITING_TITLE":
         session["src"] = (message.chat.id, message.id)
         session["premium_body"] = bool(custom_emoji_ids(message.entities) or custom_emoji_ids(getattr(message, "caption_entities", None)))
+        session["content_meta"] = {"date": message.date, "text": message.text or message.caption or "", "media": bool(getattr(message, "media", None))}
         session["state"] = "BUILDING"
         await send_preview(client, uid, session)
 
@@ -512,31 +543,63 @@ async def message_handler(client: Client, message: Message):
 
 
 # ----------------- PUBLISH (classic) -----------------
+async def _post_one(session, o, grid, user_msg):
+    """Publish to one target. -> (message id or None, result line, show the /emojicheck tip?)"""
+    label, silent, note = esc(o["label"]), session.get("silent", False), ""
+    if user_msg is not None:  # as the Premium account: premium emoji in the text survive, the bot then adds the buttons
+        try:
+            sent = await userpost.post(BOT_USERNAME, user_msg, o["chat_id"], o.get("thread_id"), silent)
+            mid, extra, tip = sent.id, "", False
+            if grid:
+                r2, info = await tgapi.set_markup(o["chat_id"], mid, grid)
+                if r2.get("ok") or "not modified" in tgapi.desc(r2).lower():
+                    if info["icons"] == "icons":
+                        extra = " ✨ premium icon laga"
+                    elif info["icons"] == "fallback":
+                        extra, tip = "\n⚠️ Button ka premium icon nahi laga, normal emoji use hua.", True
+                else:
+                    extra = (f"\n⚠️ Post gayi par <b>buttons nahi lage</b>: <code>{esc(tgapi.desc(r2)[:120])}</code>\n"
+                             "Bot ko channel mein <i>Edit messages of others</i> right dein (/userbot @channel se check).")
+            return mid, f'✅ {label} — <a href="{esc(T.post_link(o["chat_id"], mid), quote=True)}">open</a> 👤 Premium account se' + extra, tip
+        except Exception as e:
+            note = f"\n⚠️ Premium account se post fail ({esc(type(e).__name__)}: {esc(str(e)[:80])}) - bot se post ki."
+    src_chat, src_id = session["src"]
+    res, info = await tgapi.copy_message(o["chat_id"], src_chat, src_id, grid, o.get("thread_id"), silent=silent)
+    if not res.get("ok"):
+        return None, f"❌ {label}: <code>{esc(tgapi.desc(res))}</code>{note}", False
+    mid, tip = res["result"]["message_id"], False
+    line = f'✅ {label} — <a href="{esc(T.post_link(o["chat_id"], mid), quote=True)}">open</a>'
+    if info["icons"] == "icons":
+        line += " ✨ premium icon laga"
+    elif info["icons"] == "fallback":
+        line += f"\n⚠️ Premium icon nahi laga, normal emoji use hua.\n<code>{esc(info['reason'][:120])}</code>"
+        tip = True
+    if session.get("premium_body") and tgapi.CAPS.get(o["chat_id"], {}).get("body") is not True and await tgapi.chat_kind(o["chat_id"]) == "channel":
+        line += "\n⚠️ Post ke text ke premium emoji channel mein shayad normal dikhein. <i>(👤 Premium account se post ON karke dekhein)</i>"
+        tip = True
+    return mid, line + note, tip
+
+
 async def publish_classic(client, uid, session):
     chosen = [o for o in session["opts"] if o["key"] in session["sel"]]
     if not chosen:
         return await client.send_message(uid, "⚠️ Kam se kam ek channel/topic ✅ karein.")
-    src_chat, src_id = session["src"]
     grid = final_grid(session["grid"])
-    lines, tip = [], False
+    lines, tip, user_msg = [], False, None
+    if session.get("as_user") and userpost.enabled():
+        me = await userpost.me()
+        if me.id != uid:
+            lines.append("⚠️ Session ka account aur aap alag ho - bot se post ki.")
+        else:
+            user_msg = await userpost.find_copy(BOT_USERNAME, session["content_meta"])
+            if not user_msg:
+                lines.append("⚠️ Premium account mein aapka bheja hua message nahi mila (kya aapne content isi account se bheja?) - bot se post ki.")
     for o in chosen:
-        res, info = await tgapi.copy_message(o["chat_id"], src_chat, src_id, grid, o.get("thread_id"), silent=session.get("silent", False))
-        if not res.get("ok"):
-            lines.append(f"❌ {esc(o['label'])}: <code>{esc(tgapi.desc(res))}</code>")
-            continue
-        mid = res["result"]["message_id"]
-        line = f'✅ {esc(o["label"])} — <a href="{esc(T.post_link(o["chat_id"], mid), quote=True)}">open</a>'
-        if info["icons"] == "icons":
-            line += " ✨ premium icon laga"
-        elif info["icons"] == "fallback":
-            line += f"\n⚠️ Premium icon nahi laga, normal emoji use hua.\n<code>{esc(info['reason'][:120])}</code>"
-            tip = True
-        if session.get("pin"):
+        mid, line, t = await _post_one(session, o, grid, user_msg)
+        tip = tip or t
+        if mid and session.get("pin"):
             pr = await tgapi.pin(o["chat_id"], mid)
             line += " 📌" if pr.get("ok") else f"\n⚠️ Pin fail: <code>{esc(tgapi.desc(pr))}</code>"
-        if session.get("premium_body") and tgapi.CAPS.get(o["chat_id"], {}).get("body") is not True and await tgapi.chat_kind(o["chat_id"]) == "channel":
-            line += "\n⚠️ Post ke text ke premium emoji channel mein shayad normal dikhein."
-            tip = True
         lines.append(line)
     if tip:
         lines.append("\nℹ️ Pakka pata karne ke liye /emojicheck chalayein - wo asli test karke batata hai.")
@@ -672,9 +735,10 @@ async def callback_handler(client: Client, query: CallbackQuery):
             session["state"] = "WAITING_CUSTOM_TARGET"
             await query.answer()
             await client.send_message(uid, "✍️ Channel/topic bhejein: <code>@channel</code>, <code>-100123</code>, ya topic ke liye <code>-100123, 45</code>:")
-        elif action in ("silent", "pin"):
-            session[action] = not session.get(action, False)
-            await query.answer()
+        elif action in ("silent", "pin", "asuser"):
+            key = "as_user" if action == "asuser" else action
+            session[key] = not session.get(key, False)
+            await query.answer("Premium account se post ON - premium emoji channel mein bhi jayenge" if key == "as_user" and session[key] else None)
             await query.message.edit_reply_markup(chooser_markup(session))
         elif action.startswith("toggle:"):
             session["sel"] ^= {action[7:]}
@@ -688,8 +752,14 @@ async def main():
     print("Main Bot Starting...")
     await app.start()
     me = await app.get_me()
+    global BOT_USERNAME
+    BOT_USERNAME = me.username
     print(f"✅ Bot started as @{me.username}")
+    um = await userpost.start()
+    if um:
+        print(f"✅ Premium account (userbot) ready: {um.id}")
     await idle()
+    await userpost.stop()
     await app.stop()
 
 

@@ -33,6 +33,18 @@ config.py, server.py, requirements.txt, .python-version, Procfile
   rich message what Telegram really does. Run it on your channel, your group and your PM. The result is remembered.
 - `TRUST_ICONS=1` (env): only if /emojicheck shows icons work but posts still fall back, because Telegram does not echo the buttons back.
 
+## Post as your Premium account (session string) - premium emoji in channel posts
+Set the Render env var `USER_SESSION_STRING` (made with `python gen_session.py` on your own computer/Termux, never on Render).
+- In the publish list a new row appears: `👤 Premium account se post`. Tick it: your Premium account copies the post into the
+  channel (so the premium emoji in the text stay), and the bot then adds the buttons by editing that post.
+- Needs: your Premium account is an admin of the channel with the right to post; the bot is an admin with
+  **Edit messages of others**. `/userbot @channel` checks both. Send the content to the bot **from that same account**.
+- Not possible this way: a user account cannot attach buttons itself, so buttons still come from the bot (button icons follow the
+  bot rule, see /emojicheck). Rich Posts are sent by the bot only.
+- **Safety:** the session string controls your whole Telegram account. Only in the host's env var, never in code/GitHub/chat.
+  If it leaks: Telegram > Settings > Devices > end that session. Using an account from a server can make Telegram ask for
+  re-login; automating an account can get it limited - post only to your own channels, at human speed.
+
 ## Also
 - In the publish list: 🔕 Silent (no notification) and 📌 Pin.
 - Any crash inside the bot is shown to you as a message instead of the bot going silent.

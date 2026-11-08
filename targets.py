@@ -19,10 +19,13 @@ async def load_options(uid: int, kinds: str) -> list:
     return opts
 
 
-def chooser_pairs(opts: list, selected: set, silent: bool = False, pin: bool = False) -> list:
-    """Rows of (label, action). Actions: 'toggle:<key>' | 'silent' | 'pin' | 'custom' | 'go' | 'back'"""
+def chooser_pairs(opts: list, selected: set, silent: bool = False, pin: bool = False, as_user=None) -> list:
+    """Rows of (label, action). Actions: 'toggle:<key>' | 'silent' | 'pin' | 'asuser' | 'custom' | 'go' | 'back'
+    as_user: None = hide the row, True/False = shown ticked / unticked"""
     rows = [[(("✅ " if o["key"] in selected else "⬜ ") + f"{o['icon']} {o['label']}", f"toggle:{o['key']}")] for o in opts]
     rows.append([("🔕 Silent " + ("✅" if silent else "⬜"), "silent"), ("📌 Pin " + ("✅" if pin else "⬜"), "pin")])
+    if as_user is not None:
+        rows.append([("👤 Premium account se post " + ("✅" if as_user else "⬜"), "asuser")])
     rows.append([("➕ Custom", "custom"), (f"🚀 Publish ({len(selected)})", "go")])
     rows.append([("⬅️ Back", "back")])
     return rows
