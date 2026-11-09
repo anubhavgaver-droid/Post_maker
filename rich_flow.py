@@ -8,7 +8,9 @@ from bson import ObjectId
 
 import blocks as B
 import db
+import scheduler
 import targets as T
+import templates_builtin as TB
 import tgapi
 from entities import entities_to_html, plain
 
@@ -99,12 +101,14 @@ HELP = {
     "b": "Har line ek button: <code>Name | Link | color</code>\n◉ Ek row mein 8 tak\n◉ Khali line = nayi row\n◉ Name ke saath <b>premium emoji</b> bhejo = button icon\nExample:\n<code>🔥 Join | https://t.me/mychannel | green\nHelp | https://t.me/helpbot</code>",
     "custom": "Channel/topic bhejein: <code>@channel</code> ya <code>-1001234567890</code>.\nTopic ke liye: <code>-1001234567890, 45</code> ya topic ka link.",
     "tpl": "Template ka naam bhejein.",
+    "sched": "Kab post karni hai? Aise likhein:\n<code>30m</code> / <code>2h</code> / <code>1d 6h</code> = itni der baad\n<code>18:30</code> = aaj (ya agle din) 18:30 par\n<code>kal 09:00</code> = kal subah 9 baje\n<code>25/12 09:00</code> = us tareekh par\nTime zone: UTC{tz}.",
 }
 
 
 def prompt_view(kind: str, current: str = ""):
-    title = {"custom": "✍️ Custom target", "tpl": "💾 Save template"}.get(kind, f"{B.ICON.get(kind, '')} {B.NAME.get(kind, '')}")
-    body = f"<h2>{title}</h2>" + "".join(P(x) for x in HELP[kind].split("\n"))
+    title = {"custom": "✍️ Custom target", "tpl": "💾 Save template", "sched": "📅 Schedule"}.get(kind, f"{B.ICON.get(kind, '')} {B.NAME.get(kind, '')}")
+    tz = f"{scheduler.TZ_MIN // 60:+d}:{abs(scheduler.TZ_MIN) % 60:02d}"
+    body = f"<h2>{title}</h2>" + "".join(P(x) for x in HELP[kind].replace("{tz}", tz).split("\n"))
     if current:
         body += P("<b>Current:</b>") + f"<pre>{esc(plain(current))}</pre>"
     return body + P("👇 <i>Ab bhejein</i>"), [row(cb("❌ Cancel", "rp:cancel", "danger"))]
@@ -117,7 +121,7 @@ def chooser_view(s: dict):
     if not s["opts"]:
         body += P("<i>Koi saved channel/topic nahi. ➕ Custom use karein ya main menu se 📢 Channels mein add karein.</i>")
     rows = [row(*[cb(label, f"rp:tg:{action}", "success" if action == "go" else ("danger" if action == "back" else "primary")) for label, action in r])
-            for r in T.chooser_pairs(s["opts"], s["sel"], s["silent"], s["pin"])]
+            for r in T.chooser_pairs(s["opts"], s["sel"], {"silent": s["silent"], "pin": s["pin"], "autodel": s.get("autodel", 0)})]
     return body, rows
 
 
@@ -166,6 +170,18 @@ async def on_text(client, message, s: dict):
         s["await"] = None
         return await show(client, uid, s, *main_view(s, f"✅ Template saved: <b>{esc(name)}</b>"))
 
+    if kind == "sched":
+        due = scheduler.parse_when(plain(raw))
+        if not due:
+            body, rows = prompt_view("sched")
+            return await show(client, uid, s, P("❌ Time samajh nahi aaya.") + body, rows)
+        chosen = [o for o in s["opts"] if o["key"] in s["sel"]]
+        await scheduler.add_job({"kind": "post", "type": "rich", "user_id": uid, "due": due, "blocks": s["blocks"],
+                                 "targets": [{"chat_id": o["chat_id"], "thread_id": o.get("thread_id"), "label": o["label"]} for o in chosen],
+                                 "silent": s["silent"], "pin": s["pin"], "autodel": s.get("autodel", 0), "title": B.title_of(s["blocks"])})
+        s["await"] = None
+        return await show(client, uid, s, *main_view(s, f"📅 <b>Schedule ho gaya:</b> {scheduler.fmt_time(due)} ({len(chosen)} jagah). Dekhne/cancel: <b>📅 Scheduled</b> menu."))
+
     if kind == "custom":
         parsed = T.parse_custom(plain(raw))
         if not parsed:
@@ -195,22 +211,23 @@ def _line(label: str, link: str, fb: bool) -> str:
     return f'✅ {esc(label)} — <a href="{esc(link, quote=True)}">open</a>' + (" <i>(normal emoji use hua)</i>" if fb else "")
 
 
-async def publish(client, uid: int, s: dict):
-    chosen = [o for o in s["opts"] if o["key"] in s["sel"]]
-    if not chosen:
-        return await show(client, uid, s, *chooser_view(s))
-    h = B.render(s["blocks"])
+async def publish_core(uid: int, blocks: list, chosen: list, silent: bool, pin: bool, autodel: int):
+    """Send a rich post to every chosen target. -> (result lines, id of the saved post or None)"""
+    h = B.render(blocks)
     uses_emoji = "<tg-emoji" in h
     lines, done, warned = [], [], False
     for o in chosen:
-        res, fb = await tgapi.send_rich(o["chat_id"], h, o.get("thread_id"), silent=s["silent"])
+        res, fb = await tgapi.send_rich(o["chat_id"], h, o.get("thread_id"), silent=silent)
         if res.get("ok"):
             mid = res["result"]["message_id"]
             done.append({"chat_id": o["chat_id"], "message_id": mid, "thread_id": o.get("thread_id"), "name": o["label"]})
             line = _line(o["label"], T.post_link(o["chat_id"], mid), fb)
-            if s["pin"]:
+            if pin:
                 pr = await tgapi.pin(o["chat_id"], mid)
                 line += " 📌" if pr.get("ok") else f" ⚠️ pin fail: <code>{esc(tgapi.desc(pr))}</code>"
+            if autodel:
+                await scheduler.add_delete(o["chat_id"], mid, autodel)
+                line += f" 🗑 {T.autodel_label(autodel)} baad delete"
             if uses_emoji:  # say it loudly when the premium emoji probably did not make it
                 cap = tgapi.CAPS.get(o["chat_id"], {}).get("body")
                 kind = await tgapi.chat_kind(o["chat_id"])
@@ -225,12 +242,28 @@ async def publish(client, uid: int, s: dict):
             lines.append(f"❌ {esc(o['label'])}: <code>{esc(tgapi.desc(res))}</code>")
     if warned:
         lines.append("ℹ️ Pakka pata karne ke liye /emojicheck chalayein - wo asli test karke batata hai.")
+    doc_id = None
     if done:
-        doc = {"user_id": uid, "title": B.title_of(s["blocks"]), "blocks": s["blocks"], "targets": done, "ts": time.time()}
-        ins = await db.rich_posts.insert_one(doc)
-        s["edit_post"] = str(ins.inserted_id)
-    note = "<b>Publish result</b>" + "".join(P(x) for x in lines)
-    await show(client, uid, s, *main_view(s, note))
+        ins = await db.rich_posts.insert_one({"user_id": uid, "title": B.title_of(blocks), "blocks": blocks, "targets": done, "ts": time.time()})
+        doc_id = str(ins.inserted_id)
+    return lines, doc_id
+
+
+async def publish(client, uid: int, s: dict):
+    chosen = [o for o in s["opts"] if o["key"] in s["sel"]]
+    if not chosen:
+        return await show(client, uid, s, *chooser_view(s))
+    lines, doc_id = await publish_core(uid, s["blocks"], chosen, s["silent"], s["pin"], s.get("autodel", 0))
+    if doc_id:
+        s["edit_post"] = doc_id
+    await show(client, uid, s, *main_view(s, "<b>Publish result</b>" + "".join(P(x) for x in lines)))
+
+
+async def exec_rich(client, job: dict) -> str:
+    """Runs a scheduled rich post (called by scheduler.py)."""
+    chosen = [{"chat_id": t["chat_id"], "thread_id": t.get("thread_id"), "label": t["label"]} for t in job["targets"]]
+    lines, _ = await publish_core(job["user_id"], job["blocks"], chosen, job["silent"], job["pin"], job.get("autodel", 0))
+    return "📅 <b>Scheduled post ka result</b>\n\n" + "\n".join(x.replace("<br/>", "\n") for x in lines)
 
 
 async def update_published(client, uid: int, s: dict):
@@ -341,6 +374,15 @@ async def callback(client, query, sessions: dict):
         elif action in ("silent", "pin"):
             s[action] = not s[action]
             await show(client, uid, s, *chooser_view(s))
+        elif action == "autodel":
+            s["autodel"] = T.next_autodel(s.get("autodel", 0))
+            await show(client, uid, s, *chooser_view(s))
+        elif action == "sched":
+            if not s["sel"]:
+                toast = "Pehle kam se kam ek jagah ✅ karein"
+            else:
+                s["await"] = {"kind": "sched"}
+                await show(client, uid, s, *prompt_view("sched"))
         elif action.startswith("toggle:"):
             key = action[7:]
             s["sel"] ^= {key}
@@ -356,9 +398,17 @@ async def callback(client, query, sessions: dict):
     elif d == "tpl_list":
         tpls = await db.templates.find({"user_id": uid, "kind": "rich"}).to_list(length=None)
         body = "<h2>📋 TEMPLATES</h2>" + (P("Load karne ke liye chunein.") if tpls else P("Abhi koi template nahi."))
-        rows = [row(cb(f"📋 {t['name'][:28]}", f"rp:tpl_use:{t['_id']}"), cb("🗑", f"rp:tpl_del:{t['_id']}", "danger")) for t in tpls]
+        rows = [row(cb("🎁 Ready-made templates", "rp:gal", "success"))]
+        rows += [row(cb(f"📋 {t['name'][:28]}", f"rp:tpl_use:{t['_id']}"), cb("🗑", f"rp:tpl_del:{t['_id']}", "danger")) for t in tpls]
         rows.append(row(cb("⬅️ Back", "rp:back")))
         await show(client, uid, s, body, rows)
+    elif d == "gal":
+        rows = [row(cb(name, f"rp:gal_use:{i}")) for i, name in enumerate(TB.NAMES)] + [row(cb("⬅️ Back", "rp:tpl_list"))]
+        await show(client, uid, s, "<h2>🎁 READY-MADE</h2>" + P("Ek chunein - phir apne text aur links se badal dein (✏️ Edit blocks)."), rows)
+    elif d.startswith("gal_use:"):
+        i = int(d[8:])
+        s["blocks"], s["edit_post"] = TB.build(i), None
+        await show(client, uid, s, *main_view(s, f"✅ Template load hua: <b>{esc(TB.NAMES[i])}</b> - ab text/links badlein"))
     elif d.startswith("tpl_use:"):
         t = await db.templates.find_one({"_id": ObjectId(d[8:])})
         if t:

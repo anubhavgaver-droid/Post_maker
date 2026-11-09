@@ -19,16 +19,32 @@ async def load_options(uid: int, kinds: str) -> list:
     return opts
 
 
-def chooser_pairs(opts: list, selected: set, silent: bool = False, pin: bool = False, as_user=None) -> list:
-    """Rows of (label, action). Actions: 'toggle:<key>' | 'silent' | 'pin' | 'asuser' | 'custom' | 'go' | 'back'
-    as_user: None = hide the row, True/False = shown ticked / unticked"""
+AUTODEL_STEPS = [0, 3600, 86400, 604800]
+
+
+def autodel_label(sec: int) -> str:
+    return {0: "off", 3600: "1h", 86400: "24h", 604800: "7d"}.get(sec, f"{sec}s")
+
+
+def chooser_pairs(opts: list, selected: set, f: dict = None) -> list:
+    """Rows of (label, action). Actions: toggle:<key> | silent | pin | asuser | lines | autodel | sched | custom | go | back
+    f = flags: silent, pin, autodel (seconds), as_user / lines (None = hide that row)"""
+    f = f or {}
     rows = [[(("✅ " if o["key"] in selected else "⬜ ") + f"{o['icon']} {o['label']}", f"toggle:{o['key']}")] for o in opts]
-    rows.append([("🔕 Silent " + ("✅" if silent else "⬜"), "silent"), ("📌 Pin " + ("✅" if pin else "⬜"), "pin")])
-    if as_user is not None:
-        rows.append([("👤 Premium account se post " + ("✅" if as_user else "⬜"), "asuser")])
+    rows.append([("🔕 Silent " + ("✅" if f.get("silent") else "⬜"), "silent"), ("📌 Pin " + ("✅" if f.get("pin") else "⬜"), "pin")])
+    if f.get("as_user") is not None:
+        rows.append([("👤 Premium account se post " + ("✅" if f["as_user"] else "⬜"), "asuser")])
+        if f.get("lines") is not None:
+            rows.append([("🔗 Premium emoji wale buttons text-links bane " + ("✅" if f["lines"] else "⬜"), "lines")])
+    rows.append([(f"🗑 Auto-delete: {autodel_label(f.get('autodel', 0))}", "autodel"), ("📅 Schedule", "sched")])
     rows.append([("➕ Custom", "custom"), (f"🚀 Publish ({len(selected)})", "go")])
     rows.append([("⬅️ Back", "back")])
     return rows
+
+
+def next_autodel(sec: int) -> int:
+    i = AUTODEL_STEPS.index(sec) if sec in AUTODEL_STEPS else 0
+    return AUTODEL_STEPS[(i + 1) % len(AUTODEL_STEPS)]
 
 
 def add_custom(opts: list, selected: set, chat_id, thread_id=None, label=None):

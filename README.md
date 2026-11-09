@@ -33,17 +33,26 @@ config.py, server.py, requirements.txt, .python-version, Procfile
   rich message what Telegram really does. Run it on your channel, your group and your PM. The result is remembered.
 - `TRUST_ICONS=1` (env): only if /emojicheck shows icons work but posts still fall back, because Telegram does not echo the buttons back.
 
-## Post as your Premium account (session string) - premium emoji in channel posts
-Set the Render env var `USER_SESSION_STRING` (made with `python gen_session.py` on your own computer/Termux, never on Render).
-- In the publish list a new row appears: `👤 Premium account se post`. Tick it: your Premium account copies the post into the
-  channel (so the premium emoji in the text stay), and the bot then adds the buttons by editing that post.
-- Needs: your Premium account is an admin of the channel with the right to post; the bot is an admin with
-  **Edit messages of others**. `/userbot @channel` checks both. Send the content to the bot **from that same account**.
-- Not possible this way: a user account cannot attach buttons itself, so buttons still come from the bot (button icons follow the
-  bot rule, see /emojicheck). Rich Posts are sent by the bot only.
-- **Safety:** the session string controls your whole Telegram account. Only in the host's env var, never in code/GitHub/chat.
-  If it leaks: Telegram > Settings > Devices > end that session. Using an account from a server can make Telegram ask for
-  re-login; automating an account can get it limited - post only to your own channels, at human speed.
+## Post as your Premium account (premium emoji in channel posts)
+Add the session string from the bot: `/setsession` (super admins only). The bot deletes your message at once, checks the session,
+and saves it **encrypted** in MongoDB (key derived from BOT_TOKEN, which is never stored). `/delsession` removes it. You can still use the env var
+`USER_SESSION_STRING` instead. Make the string with `python gen_session.py` on your own computer/Termux, never on Render.
+- In the publish list a row appears: `👤 Premium account se post`. Your Premium account copies the post into the channel (the premium emoji
+  in the text stay), then the bot adds the buttons by editing the post. Send the content to the bot **from that same account**.
+- Needs: the account is an admin of the channel with the right to post; the bot is an admin with **Edit messages of others**.
+  `/userbot @channel` checks both.
+- **Premium icons on buttons in a channel are impossible** for any bot unless the bot owns a Fragment username (Telegram's rule). The
+  option `🔗 Premium emoji wale buttons text-links bane` is the working alternative: those buttons become clickable text links
+  (premium emoji + name) at the end of the post text/caption, the other buttons stay normal buttons.
+- Rich Posts are sent by the bot only.
+- **Safety:** the session string controls your whole Telegram account. Super admins only; never in code/GitHub/chat. If it leaks:
+  Telegram > Settings > Devices > end that session. Use your own channels and human speed.
+
+## Schedule, auto-delete, templates
+- Publish list: `📅 Schedule` (30m, 2h, 18:30, kal 09:00, 25/12 09:00 - timezone from env `TZ_OFFSET_MIN`, default 330 = India)
+  and `🗑 Auto-delete` (off / 1h / 24h / 7d after posting). Both work for classic and rich posts and survive restarts (MongoDB).
+  Menu `📅 Scheduled` lists and cancels them. Keep the content message in the bot chat until the scheduled post has gone out.
+- 🎨 Rich Post > Templates > `🎁 Ready-made templates`: Announcement, New Release, Chats Board, Giveaway, Links Hub.
 
 ## Also
 - In the publish list: 🔕 Silent (no notification) and 📌 Pin.

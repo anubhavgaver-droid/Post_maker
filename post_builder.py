@@ -1,4 +1,5 @@
 import asyncio
+import datetime
 import functools
 import html
 import logging
@@ -19,6 +20,7 @@ import blocks as B
 import db
 import emojicheck
 import rich_flow
+import scheduler
 import targets as T
 import tgapi
 import userpost
@@ -35,10 +37,10 @@ esc = html.escape
 
 MENU = {
     "new": "📝 New Post", "edit": "🔗 Edit Post", "topic": "💬 Topic Post", "edittopic": "✏️ Edit Topic",
-    "rich": "🎨 Rich Post", "posts": "📚 My Rich Posts", "channels": "📢 Channels", "topics": "💬 Topics",
+    "rich": "🎨 Rich Post", "posts": "📚 My Rich Posts", "sched": "📅 Scheduled", "channels": "📢 Channels", "topics": "💬 Topics",
     "cancel": "❌ Cancel Process",
 }
-COMMANDS = ["start", "help", "cancel", "newpost", "editpost", "topicpost", "edittopic", "richpost", "emojicheck", "userbot", "addadmin", "deladmin", "adminlist"]
+COMMANDS = ["start", "help", "cancel", "newpost", "editpost", "topicpost", "edittopic", "richpost", "emojicheck", "userbot", "setsession", "delsession", "addadmin", "deladmin", "adminlist"]
 MENU_RE = filters.regex(r"^(?:" + "|".join(re.escape(v) for v in MENU.values()) + r")$")
 
 
@@ -60,7 +62,8 @@ def main_menu_keyboard():
             [MENU["new"], MENU["edit"]],
             [MENU["topic"], MENU["edittopic"]],
             [MENU["rich"], MENU["posts"]],
-            [MENU["channels"], MENU["topics"]],
+            [MENU["sched"], MENU["channels"]],
+            [MENU["topics"]],
         ],
         resize_keyboard=True,
     )
@@ -97,8 +100,13 @@ def safe(fn):
 
 
 def chooser_markup(session):
-    as_user = session.get("as_user", False) if (userpost.enabled() and session.get("mode") in ("NEW", "TOPIC_NEW")) else None
-    return pairs_markup(T.chooser_pairs(session["opts"], session["sel"], session.get("silent", False), session.get("pin", False), as_user))
+    on = userpost.enabled() and session.get("mode") in ("NEW", "TOPIC_NEW")
+    as_user = session.get("as_user", False) if on else None
+    has_icon = any(b.get("icon") for row in session.get("grid", []) for b in row if b)
+    lines = session.get("lines", False) if (on and as_user and has_icon) else None
+    return pairs_markup(T.chooser_pairs(session["opts"], session["sel"], {
+        "silent": session.get("silent", False), "pin": session.get("pin", False), "autodel": session.get("autodel", 0),
+        "as_user": as_user, "lines": lines}))
 
 
 def pairs_markup(rows):
@@ -228,8 +236,9 @@ HELP_TEXT = (
     "📚 <b>My Rich Posts</b> – publish ki hui rich posts edit / delete karo.\n\n"
     "✨ <b>Premium emoji:</b> button ke naam ke saath premium emoji bhejo = button icon. Rich post ke text mein bhi chalta hai.\n"
     "🔎 Koi premium emoji akele bhejo (jab koi process na chal raha ho) – main uski ID bata dunga.\n"
+    "📅 <b>Schedule</b> – publish list mein: baad ke liye post, aur 🗑 auto-delete. 🎁 Rich Post → Templates → ready-made templates.\n"
     "🧪 /emojicheck – asli test: kis chat mein premium emoji chalta hai, kis mein nahi.\n"
-    "👤 /userbot – Premium account se channel post (text ke premium emoji channel mein bhi)."
+    "👤 /userbot – Premium account se channel post (text ke premium emoji channel mein bhi). /setsession se string jodein, /delsession se hatayein."
 )
 
 
@@ -338,6 +347,27 @@ async def emojicheck_cmd(client, message):
         reply_markup=cancel_only_keyboard())
 
 
+@app.on_message(filters.command("setsession") & filters.private)
+async def setsession_cmd(client, message):
+    uid = message.from_user.id
+    if uid not in ADMIN_IDS:  # only the super admins, never dynamic admins
+        return await message.reply_text("❌ Ye command sirf super admin chala sakta hai.")
+    user_sessions[uid] = {"state": "SESSION_WAIT"}
+    await message.reply_text(
+        "👤 <b>Premium account jodein</b>\nApni <b>session string</b> bhejein (lambi, bina space ki). Main use turant chat se delete kar dunga "
+        "aur <b>encrypted</b> database mein rakhunga.\n\n"
+        "⚠️ Ye string aapke poore account ki chaabi hai - kisi aur ko na dein. Banane ke liye apne computer/Termux par <code>python gen_session.py</code> chalayein.",
+        reply_markup=cancel_only_keyboard())
+
+
+@app.on_message(filters.command("delsession") & filters.private)
+async def delsession_cmd(client, message):
+    if message.from_user.id not in ADMIN_IDS:
+        return await message.reply_text("❌ Ye command sirf super admin chala sakta hai.")
+    me = await userpost.remove()
+    await message.reply_text("🗑 Saved session hata diya." + (f"\n↪️ Environment ki session ({me.id}) chalu hui." if me else "\nPremium account se post ab OFF hai."))
+
+
 @app.on_message(filters.command("userbot") & filters.private)
 async def userbot_cmd(client, message):
     uid = message.from_user.id
@@ -348,10 +378,10 @@ async def userbot_cmd(client, message):
             "👤 <b>Premium account (userbot) OFF hai.</b>\n\n"
             "Isse channel mein post ke text ke premium emoji bhi chalte hain.\n"
             "1) Apne computer/Termux par <code>python gen_session.py</code> chalakar session string banayein.\n"
-            "2) Render Environment mein <code>USER_SESSION_STRING</code> mein daalein, redeploy karein.\n\n"
+            "2) Bot mein <code>/setsession</code> bhejkar string dein - ye database mein encrypted save hogi (ya Render Environment mein <code>USER_SESSION_STRING</code>).\n\n"
             "⚠️ Session string = aapke poore account ki chaabi. Kisi ko na dein, GitHub par na daalein.")
     me = await userpost.me()
-    text = (f"👤 <b>Premium account ON</b>\nNaam: {esc(me.first_name or '')}  <code>{me.id}</code>\n"
+    text = (f"👤 <b>Premium account ON</b> <i>({'database mein encrypted' if userpost.source == 'db' else 'environment se'})</i>\nNaam: {esc(me.first_name or '')}  <code>{me.id}</code>\n"
             f"Premium: {'✅' if getattr(me, 'is_premium', None) else '❌ (Premium nahi dikh raha)'}\n"
             f"{'✅ Ye wahi account hai jisse aap bot ko content bhejte hain.' if me.id == uid else '⚠️ Ye account aapke Telegram account se alag hai - content isi account se bhejna padega.'}")
     if len(message.command) > 1:
@@ -372,6 +402,21 @@ async def myposts_cmd(client, message):
     s = rich_flow.new_session()
     user_sessions[uid] = s
     await rich_flow.open_posts(client, uid, message.chat.id, s)
+
+
+@app.on_message(_label("sched") & filters.private)
+async def scheduled_menu(client, message):
+    uid = message.from_user.id
+    if not await check_is_admin(uid):
+        return
+    jobs = await scheduler.list_jobs(uid)
+    if not jobs:
+        return await message.reply_text("📅 Koi scheduled post nahi hai.\nPost banate waqt publish list mein <b>📅 Schedule</b> dabayein.")
+    lines, kb = ["📅 <b>Scheduled posts</b>"], []
+    for j in jobs:
+        lines.append(f"• {scheduler.fmt_time(j['due'])} — {esc(j.get('title') or 'Classic post')} ({len(j['targets'])} jagah)")
+        kb.append([InlineKeyboardButton(f"❌ Cancel: {scheduler.fmt_time(j['due'])}", callback_data=f"sj_cancel_{j['_id']}")])
+    await message.reply_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(kb))
 
 
 @app.on_message(_label("channels") & filters.private)
@@ -416,6 +461,30 @@ async def message_handler(client: Client, message: Message):
 
     if state == "RICH":
         return await rich_flow.on_text(client, message, session)
+
+    if state == "SESSION_WAIT":
+        string = text.strip()
+        try:
+            await message.delete()  # the string must not stay in the chat
+        except Exception:
+            pass
+        if len(string) < 100 or any(ch.isspace() for ch in string):
+            return await client.send_message(uid, "⚠️ Ye session string nahi lag rahi (lambi, bina space ki hoti hai). Dobara bhejein ya ❌ Cancel Process dabayein.")
+        user_sessions.pop(uid, None)
+        wait = await client.send_message(uid, "⏳ Session check ho raha hai…")
+        try:
+            me = await userpost.replace(string, uid)
+        except Exception as e:
+            return await wait.edit_text(
+                f"❌ Session nahi chala: <code>{esc(type(e).__name__)}</code>\n"
+                "String galat/purani ho sakti hai (naya banayein: <code>python gen_session.py</code>)."
+                + ("\n↩️ Pehle wala session wapas chalu kar diya." if userpost.enabled() else ""))
+        return await wait.edit_text(
+            f"✅ <b>Premium account jud gaya</b>\nNaam: {esc(me.first_name or '')}  <code>{me.id}</code>\n"
+            f"Premium: {'✅' if getattr(me, 'is_premium', None) else '❌ (Premium nahi dikh raha)'}\n"
+            f"{'✅ Ye wahi account hai jisse aap bot ko content bhejte hain.' if me.id == uid else '⚠️ Ye account aapke Telegram account se alag hai - content isi account se bhejna padega.'}\n\n"
+            "🔐 Database mein <b>encrypted</b> save hui. Jo message aapne bheja tha wo maine delete kar diya - chat history bhi saaf kar dein.\n"
+            "Check: <code>/userbot @channel</code>")
 
     if state == "EMO_ID":
         eid, fb = first_custom_emoji(text, message.entities)
@@ -524,6 +593,15 @@ async def message_handler(client: Client, message: Message):
         await refresh_preview(client, uid, session)
         asyncio.create_task(toast(client, uid, "✨ Button add ho gaya! ☝️ Preview dekhein."))
 
+    elif state == "WAITING_SCHEDULE":
+        due = scheduler.parse_when(text)
+        if not due:
+            return await message.reply_text("⚠️ Time samajh nahi aaya. Aise likhein: <code>30m</code>, <code>2h</code>, <code>18:30</code>, <code>kal 09:00</code>, <code>25/12 09:00</code>")
+        chosen = [o for o in session["opts"] if o["key"] in session["sel"]]
+        await scheduler.add_job(classic_job(session, chosen, uid, due))
+        user_sessions.pop(uid, None)
+        await message.reply_text(f"📅 <b>Schedule ho gaya:</b> {scheduler.fmt_time(due)} ({len(chosen)} jagah)\nDekhne/cancel: <b>{MENU['sched']}</b>.", reply_markup=main_menu_keyboard())
+
     elif state == "WAITING_LAYOUT_NAME":
         name = text.strip()[:40]
         if not name:
@@ -548,18 +626,20 @@ async def _post_one(session, o, grid, user_msg):
     label, silent, note = esc(o["label"]), session.get("silent", False), ""
     if user_msg is not None:  # as the Premium account: premium emoji in the text survive, the bot then adds the buttons
         try:
-            sent = await userpost.post(BOT_USERNAME, user_msg, o["chat_id"], o.get("thread_id"), silent)
-            mid, extra, tip = sent.id, "", False
-            if grid:
-                r2, info = await tgapi.set_markup(o["chat_id"], mid, grid)
+            as_lines = [b for row in grid for b in row if b.get("icon")] if session.get("lines") else []
+            keep = [r for r in ([b for b in row if not (as_lines and b.get("icon"))] for row in grid) if r]
+            sent = await userpost.post(BOT_USERNAME, user_msg, o["chat_id"], o.get("thread_id"), silent, link_lines=as_lines)
+            mid, extra, tip = sent.id, (f" 🔗 {len(as_lines)} premium-emoji link text mein" if as_lines else ""), False
+            if keep:
+                r2, info = await tgapi.set_markup(o["chat_id"], mid, keep)
                 if r2.get("ok") or "not modified" in tgapi.desc(r2).lower():
                     if info["icons"] == "icons":
-                        extra = " ✨ premium icon laga"
+                        extra += " ✨ premium icon laga"
                     elif info["icons"] == "fallback":
-                        extra, tip = "\n⚠️ Button ka premium icon nahi laga, normal emoji use hua.", True
+                        extra, tip = extra + "\n⚠️ Button ka premium icon nahi laga, normal emoji use hua. <i>(🔗 option se icon wale buttons text-link ban sakte hain)</i>", True
                 else:
-                    extra = (f"\n⚠️ Post gayi par <b>buttons nahi lage</b>: <code>{esc(tgapi.desc(r2)[:120])}</code>\n"
-                             "Bot ko channel mein <i>Edit messages of others</i> right dein (/userbot @channel se check).")
+                    extra += (f"\n⚠️ Post gayi par <b>buttons nahi lage</b>: <code>{esc(tgapi.desc(r2)[:120])}</code>\n"
+                              "Bot ko channel mein <i>Edit messages of others</i> right dein (/userbot @channel se check).")
             return mid, f'✅ {label} — <a href="{esc(T.post_link(o["chat_id"], mid), quote=True)}">open</a> 👤 Premium account se' + extra, tip
         except Exception as e:
             note = f"\n⚠️ Premium account se post fail ({esc(type(e).__name__)}: {esc(str(e)[:80])}) - bot se post ki."
@@ -580,10 +660,8 @@ async def _post_one(session, o, grid, user_msg):
     return mid, line + note, tip
 
 
-async def publish_classic(client, uid, session):
-    chosen = [o for o in session["opts"] if o["key"] in session["sel"]]
-    if not chosen:
-        return await client.send_message(uid, "⚠️ Kam se kam ek channel/topic ✅ karein.")
+async def run_classic(client, uid, session, chosen):
+    """Publish a classic post to the chosen targets (used by the publish button AND by scheduled jobs). -> result lines"""
     grid = final_grid(session["grid"])
     lines, tip, user_msg = [], False, None
     if session.get("as_user") and userpost.enabled():
@@ -591,7 +669,7 @@ async def publish_classic(client, uid, session):
         if me.id != uid:
             lines.append("⚠️ Session ka account aur aap alag ho - bot se post ki.")
         else:
-            user_msg = await userpost.find_copy(BOT_USERNAME, session["content_meta"])
+            user_msg = await userpost.find_copy(BOT_USERNAME, session["content_meta"], limit=session.get("find_limit", 30))
             if not user_msg:
                 lines.append("⚠️ Premium account mein aapka bheja hua message nahi mila (kya aapne content isi account se bheja?) - bot se post ki.")
     for o in chosen:
@@ -600,11 +678,48 @@ async def publish_classic(client, uid, session):
         if mid and session.get("pin"):
             pr = await tgapi.pin(o["chat_id"], mid)
             line += " 📌" if pr.get("ok") else f"\n⚠️ Pin fail: <code>{esc(tgapi.desc(pr))}</code>"
+        if mid and session.get("autodel"):
+            await scheduler.add_delete(o["chat_id"], mid, session["autodel"])
+            line += f" 🗑 {T.autodel_label(session['autodel'])} baad delete"
         lines.append(line)
     if tip:
         lines.append("\nℹ️ Pakka pata karne ke liye /emojicheck chalayein - wo asli test karke batata hai.")
+    return lines
+
+
+async def publish_classic(client, uid, session):
+    chosen = [o for o in session["opts"] if o["key"] in session["sel"]]
+    if not chosen:
+        return await client.send_message(uid, "⚠️ Kam se kam ek channel/topic ✅ karein.")
+    lines = await run_classic(client, uid, session, chosen)
     await client.send_message(uid, "🎉 <b>Publish result</b>\n\n" + "\n".join(lines), reply_markup=main_menu_keyboard(), disable_web_page_preview=True)
     user_sessions.pop(uid, None)
+
+
+def classic_job(session, chosen, uid, due):
+    """Everything needed to publish this classic post later (stored in MongoDB)."""
+    meta = session.get("content_meta") or {}
+    return {
+        "kind": "post", "type": "classic", "user_id": uid, "due": due, "title": "Classic post",
+        "targets": [{"chat_id": o["chat_id"], "thread_id": o.get("thread_id"), "label": o["label"]} for o in chosen],
+        "src": list(session["src"]), "grid": final_grid(session["grid"]),
+        "silent": session.get("silent", False), "pin": session.get("pin", False), "autodel": session.get("autodel", 0),
+        "as_user": bool(session.get("as_user")) and userpost.enabled(), "lines": session.get("lines", False),
+        "premium_body": session.get("premium_body", False),
+        "content_meta": {"date": meta["date"].timestamp() if meta.get("date") else 0, "text": meta.get("text", ""), "media": meta.get("media", False)},
+    }
+
+
+async def exec_classic(client, job):
+    """Runs a scheduled classic post (called by scheduler.py)."""
+    m = job["content_meta"]
+    session = {"silent": job["silent"], "pin": job["pin"], "autodel": job.get("autodel", 0), "src": tuple(job["src"]),
+               "grid": [list(r) for r in job["grid"]], "as_user": job["as_user"], "lines": job.get("lines", False),
+               "premium_body": job.get("premium_body", False), "find_limit": 300,
+               "content_meta": {"date": datetime.datetime.fromtimestamp(m["date"]), "text": m["text"], "media": m["media"]}}
+    chosen = [{"key": f"j{i}", "label": t["label"], "chat_id": t["chat_id"], "thread_id": t.get("thread_id")} for i, t in enumerate(job["targets"])]
+    lines = await run_classic(client, job["user_id"], session, chosen)
+    return "📅 <b>Scheduled post ka result</b>\n\n" + "\n".join(lines)
 
 
 # ----------------- CALLBACK QUERY HANDLER -----------------
@@ -619,6 +734,10 @@ async def callback_handler(client: Client, query: CallbackQuery):
     if data.startswith("rp:"):
         return await rich_flow.callback(client, query, user_sessions)
 
+    if data.startswith("sj_cancel_"):
+        ok = await scheduler.cancel_job(data[10:], uid)
+        await query.answer("Schedule cancel ho gaya" if ok else "Ye pehle hi chal chuka / nahi mila", show_alert=True)
+        return await query.message.delete()
     if data.startswith("del_ch_"):
         await db.channels.delete_one({"_id": ObjectId(data[7:])})
         await query.answer("Channel Deleted!", show_alert=True)
@@ -735,11 +854,22 @@ async def callback_handler(client: Client, query: CallbackQuery):
             session["state"] = "WAITING_CUSTOM_TARGET"
             await query.answer()
             await client.send_message(uid, "✍️ Channel/topic bhejein: <code>@channel</code>, <code>-100123</code>, ya topic ke liye <code>-100123, 45</code>:")
-        elif action in ("silent", "pin", "asuser"):
-            key = "as_user" if action == "asuser" else action
-            session[key] = not session.get(key, False)
-            await query.answer("Premium account se post ON - premium emoji channel mein bhi jayenge" if key == "as_user" and session[key] else None)
+        elif action in ("silent", "pin", "asuser", "lines", "autodel"):
+            if action == "autodel":
+                session["autodel"] = T.next_autodel(session.get("autodel", 0))
+            else:
+                key = {"asuser": "as_user"}.get(action, action)
+                session[key] = not session.get(key, False)
+            await query.answer("Premium account se post ON - text ke premium emoji channel mein bhi jayenge" if action == "asuser" and session["as_user"] else None)
             await query.message.edit_reply_markup(chooser_markup(session))
+        elif action == "sched":
+            if not session["sel"]:
+                return await query.answer("Pehle kam se kam ek jagah ✅ karein", show_alert=True)
+            session["state"] = "WAITING_SCHEDULE"
+            await query.answer()
+            tz = f"{scheduler.TZ_MIN // 60:+d}:{abs(scheduler.TZ_MIN) % 60:02d}"
+            await client.send_message(uid, "📅 <b>Kab post karni hai?</b>\n◉ <code>30m</code> / <code>2h</code> / <code>1d 6h</code> = itni der baad\n◉ <code>18:30</code> = aaj ya agle din 18:30 par\n◉ <code>kal 09:00</code>\n◉ <code>25/12 09:00</code>\n"
+                                          f"Time zone: UTC{tz}\n⚠️ Tab tak apna content wala message is chat se delete mat karna.")
         elif action.startswith("toggle:"):
             session["sel"] ^= {action[7:]}
             await query.answer()
@@ -755,6 +885,9 @@ async def main():
     global BOT_USERNAME
     BOT_USERNAME = me.username
     print(f"✅ Bot started as @{me.username}")
+    scheduler.register("classic", exec_classic)
+    scheduler.register("rich", rich_flow.exec_rich)
+    asyncio.create_task(scheduler.run(app))
     um = await userpost.start()
     if um:
         print(f"✅ Premium account (userbot) ready: {um.id}")
